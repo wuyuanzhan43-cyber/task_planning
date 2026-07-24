@@ -88,7 +88,15 @@ export async function loadTasks(): Promise<Task[]> {
       id: String(row.id), title: String(row.title), completed: Boolean(row.completed_at)
     }]);
   });
-  return taskRows.map((row) => taskFromRow(row, tags, progress, subtasks));
+  const tasks = taskRows.map((row) => taskFromRow(row, tags, progress, subtasks));
+  if (tasks.length === 0) {
+    const legacyTasks = parseLocalTasks();
+    if (legacyTasks.length > 0) {
+      await saveTasks(legacyTasks);
+      return legacyTasks;
+    }
+  }
+  return tasks;
 }
 
 export async function saveTasks(tasks: Task[]): Promise<void> {
