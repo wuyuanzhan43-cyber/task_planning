@@ -175,3 +175,17 @@ export async function saveDailyReview(review: DailyReview): Promise<void> {
     [review.taskDate, review.reflection, review.tomorrowFocus, review.updatedAt]
   );
 }
+
+export async function loadDailyReviews(fromDate: string, toDate: string): Promise<DailyReview[]> {
+  if (!isTauriRuntime()) {
+    try {
+      const reviews = JSON.parse(localStorage.getItem(REVIEW_STORAGE_KEY) ?? "{}") as Record<string, DailyReview>;
+      return Object.values(reviews).filter((review) => review.taskDate >= fromDate && review.taskDate <= toDate).sort((a, b) => a.taskDate.localeCompare(b.taskDate));
+    } catch {
+      return [];
+    }
+  }
+  const database = await getDatabase();
+  const rows = await database.select<SqlRow>("SELECT task_date, reflection, tomorrow_focus, updated_at FROM daily_reviews WHERE task_date BETWEEN ? AND ? ORDER BY task_date ASC", [fromDate, toDate]);
+  return rows.map((row) => ({ taskDate: String(row.task_date), reflection: String(row.reflection), tomorrowFocus: String(row.tomorrow_focus), updatedAt: String(row.updated_at) }));
+}

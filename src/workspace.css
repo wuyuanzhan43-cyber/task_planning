@@ -1,0 +1,76 @@
+.calendar-workspace { max-width: 1220px; }
+.calendar-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 26px; }
+.calendar-controls { display: flex; align-items: center; gap: 4px; }
+.segmented-control { display: flex; margin-right: 8px; padding: 3px; border: 1px solid #e1e7df; border-radius: 7px; background: #fbfcfa; }
+.segmented-control button { height: 27px; min-width: 31px; padding: 0 8px; border-radius: 5px; color: #88958c; background: transparent; font-size: 11px; }
+.segmented-control button.selected { color: #45674d; background: #e6f0e4; font-weight: 700; }
+.calendar-today { height: 32px; padding: 0 9px; border-radius: 6px; color: #708078; background: transparent; font-size: 12px; }
+.calendar-today:hover { background: #eaf0e8; }
+.calendar-grid { overflow: hidden; border: 1px solid #e1e6df; border-radius: 8px; background: #fcfcfa; }
+.calendar-weekdays { display: grid; grid-template-columns: repeat(7, 1fr); min-height: 36px; border-bottom: 1px solid #e8ece6; background: #f7f9f5; }
+.calendar-weekdays span { display: grid; place-items: center; color: #98a39a; font-size: 11px; }
+.calendar-days { display: grid; grid-template-columns: repeat(7, 1fr); }
+.calendar-day { min-height: 132px; padding: 8px; border-right: 1px solid #e9ece6; border-bottom: 1px solid #e9ece6; background: #fcfcfa; transition: background .16s, box-shadow .16s; }
+.calendar-day:nth-child(7n) { border-right: 0; }
+.calendar-day:nth-last-child(-n+7) { border-bottom: 0; }
+.calendar-day.selected { background: #f4f8f1; }
+.calendar-day.outside { background: #fafbf9; }
+.calendar-day.outside .calendar-date { color: #b4bcb6; }
+.calendar-day.drag-over { background: #e8f2e5; box-shadow: inset 0 0 0 2px #a7c2a8; }
+.calendar-date { width: 25px; height: 25px; display: grid; place-items: center; border-radius: 50%; color: #617168; background: transparent; font-size: 11px; }
+.calendar-day.selected .calendar-date { color: #fff; background: #668d6d; font-weight: 700; }
+.calendar-task-stack { display: grid; gap: 4px; margin-top: 6px; }
+.calendar-task { width: 100%; display: flex; align-items: center; gap: 3px; padding: 4px 5px; overflow: hidden; border-left: 3px solid #98b49a; border-radius: 4px; color: #53665a; background: #edf4eb; font-size: 10px; text-align: left; touch-action: none; }
+.calendar-task span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.calendar-task.priority-high { border-color: #d88e84; background: #fbefeb; }
+.calendar-task.priority-medium { border-color: #d7b46f; background: #fbf5e9; }
+.calendar-task.dragging { opacity: .42; }
+.calendar-grid.week .calendar-day { min-height: 360px; }
+.calendar-grid.day .calendar-weekdays { grid-template-columns: 1fr; }
+.calendar-grid.day .calendar-days { grid-template-columns: 1fr; }
+.calendar-grid.day .calendar-day { min-height: 470px; border: 0; }
+.calendar-grid.day .calendar-task { max-width: 540px; padding: 8px 10px; font-size: 12px; }
+
+.projects-workspace { max-width: 980px; }
+.project-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 26px 0 19px; }
+.project-summary > div { display: grid; gap: 5px; padding: 15px; border: 1px solid #e1e7df; border-radius: 8px; background: #fbfcf9; }
+.project-summary strong { color: #4d6854; font-size: 23px; }
+.project-summary span { color: #95a099; font-size: 11px; }
+.project-progress-list { overflow: hidden; border: 1px solid #e1e7df; border-radius: 8px; background: #fcfcfa; }
+.project-progress { display: grid; grid-template-columns: 42px 1fr; gap: 14px; padding: 19px; border-bottom: 1px solid #e9ede7; }
+.project-progress:last-child { border-bottom: 0; }
+.project-progress .project-symbol { width: 37px; height: 37px; }
+.project-topline { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.project-topline h3 { margin: 0; color: #4b5e51; font-size: 14px; }
+.project-topline p { margin: 5px 0 0; color: #96a198; font-size: 11px; }
+.project-topline > strong { color: #638069; font-size: 15px; }
+.project-progress-bar { height: 5px; overflow: hidden; margin: 15px 0 12px; border-radius: 4px; background: #eaf0e8; }
+.project-progress-bar i { display: block; height: 100%; border-radius: inherit; background: #8dac91; }
+.project-task-links { display: flex; flex-wrap: wrap; gap: 7px; }
+.project-task-links button, .project-task-links span { display: inline-flex; align-items: center; gap: 5px; padding: 4px 6px; border-radius: 4px; color: #718077; background: #f2f5f0; font-size: 10px; }
+.project-task-links button:hover { color: #45674d; background: #e5eee3; }
+
+.insights-workspace { max-width: 980px; }
+.insight-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px; margin: 26px 0 20px; }
+.insight-cards > div { display: grid; gap: 7px; padding: 17px; border: 1px solid #e0e7de; border-radius: 8px; background: #fbfcf9; }
+.insight-cards span { display: inline-flex; align-items: center; gap: 6px; color: #809087; font-size: 11px; }
+.insight-cards span svg { color: #86a78b; }
+.insight-cards strong { color: #4b6752; font-size: 25px; }
+.insight-cards small { color: #9aa49d; font-size: 10px; }
+.trend-panel, .weekly-review { padding: 20px; border: 1px solid #e0e6de; border-radius: 8px; background: #fcfcfa; }
+.weekly-review { margin-top: 15px; }
+.panel-heading { display: flex; align-items: flex-start; justify-content: space-between; }
+.panel-heading h2 { margin: 0; color: #506158; font-size: 14px; }
+.panel-heading p { margin: 5px 0 0; color: #99a49d; font-size: 11px; }
+.panel-heading svg { color: #88a28c; }
+.trend-bars { height: 185px; display: grid; grid-template-columns: repeat(7, 1fr); gap: 13px; align-items: end; margin-top: 18px; }
+.trend-column { height: 100%; display: grid; grid-template-rows: 1fr 17px 17px; align-items: end; justify-items: center; }
+.bar-area { width: 100%; height: 100%; display: flex; align-items: end; justify-content: center; padding: 0 12px; }
+.bar-area i { width: 100%; min-height: 6px; border-radius: 5px 5px 1px 1px; background: #93b397; }
+.trend-column strong { color: #627369; font-size: 11px; }
+.trend-column span { color: #9aa49d; font-size: 10px; }
+.review-list { display: grid; gap: 10px; margin-top: 17px; }
+.review-list article { padding: 12px; border-left: 3px solid #a8c1a8; background: #f6f9f4; }
+.review-list article > span { color: #7b9680; font-size: 11px; }
+.review-list article p { margin: 7px 0; color: #617268; font-size: 12px; line-height: 1.55; }
+.review-list article small { color: #9a8579; font-size: 11px; }
