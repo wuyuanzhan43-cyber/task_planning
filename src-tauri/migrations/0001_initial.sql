@@ -45,6 +45,12 @@ CREATE TABLE IF NOT EXISTS task_progress_entries (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS daily_reviews (
+  task_date TEXT PRIMARY KEY NOT NULL,
+  reflection TEXT NOT NULL DEFAULT '',
+  tomorrow_focus TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_planned_date ON tasks(planned_date);
 CREATE INDEX IF NOT EXISTS idx_progress_task_date ON task_progress_entries(task_id, task_date);
-

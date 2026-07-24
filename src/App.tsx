@@ -6,8 +6,8 @@ import {
 } from "lucide-react";
 import { sampleTasks } from "./data/sample";
 import { dateDiff, formatTaskDate, getTaskDate, toDateKey } from "./lib/task-date";
-import { loadTasks, saveTasks } from "./lib/storage";
-import type { Priority, RepeatRule, Task } from "./types";
+import { loadDailyReview, loadTasks, saveDailyReview, saveTasks, usesSqlite } from "./lib/storage";
+import type { DailyReview, Priority, RepeatRule, Task } from "./types";
 
 type View = "today" | "calendar" | "tasks" | "projects" | "insights" | "settings";
 
@@ -33,26 +33,44 @@ function isDueOn(task: Task, date: string): boolean {
   return current.getDate() === start.getDate();
 }
 
+function completedExecutionOn(task: Task, date: string): boolean {
+  return task.progress.some((entry) => entry.taskDate === date && entry.completedToday);
+}
+
 function makeId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
 function App() {
-  const [tasks, setTasks] = useState<Task[]>(() => {
-    const saved = loadTasks();
-    return saved.length > 0 ? saved : sampleTasks;
-  });
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState<View>("today");
   const [selectedDate, setSelectedDate] = useState(getTaskDate());
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [showComposer, setShowComposer] = useState(false);
   const [progressText, setProgressText] = useState("");
+  const [dailyReview, setDailyReview] = useState<DailyReview>({ taskDate: selectedDate, reflection: "", tomorrowFocus: "", updatedAt: "" });
+  const [reviewSaved, setReviewSaved] = useState(false);
 
-  useEffect(() => saveTasks(tasks), [tasks]);
+  useEffect(() => {
+    void loadTasks().then((saved) => {
+      setTasks(saved.length > 0 ? saved : (import.meta.env.DEV ? sampleTasks : []));
+      setLoaded(true);
+    }).catch(() => setLoaded(true));
+  }, []);
+
+  useEffect(() => {
+    if (loaded) void saveTasks(tasks);
+  }, [loaded, tasks]);
+
+  useEffect(() => {
+    setReviewSaved(false);
+    void loadDailyReview(selectedDate).then(setDailyReview);
+  }, [selectedDate]);
 
   const selectedTask = tasks.find((task) => task.id === selectedTaskId) ?? null;
   const currentTasks = useMemo(
-    () => tasks.filter((task) => !task.completedAt && isDueOn(task, selectedDate)),
+    () => tasks.filter((task) => !task.completedAt && isDueOn(task, selectedDate) && !(task.repeat !== "none" && completedExecutionOn(task, selectedDate))),
     [tasks, selectedDate]
   );
   const carriedTasks = currentTasks.filter((task) => task.repeat === "none" && task.plannedDate < selectedDate);
@@ -71,10 +89,13 @@ function App() {
 
   function addProgress(taskId: string, completedToday: boolean) {
     const content = progressText.trim();
-    if (!content) return;
     updateTask(taskId, (task) => ({
       ...task,
-      progress: [...task.progress, { id: makeId("progress"), taskDate: selectedDate, content, completedToday, createdAt: new Date().toISOString() }]
+      progress: [...task.progress, {
+        id: makeId("progress"), taskDate: selectedDate,
+        content: content || (task.repeat === "none" ? "完成今日执行，原任务继续保留。" : "完成本次周期执行。"),
+        completedToday, createdAt: new Date().toISOString()
+      }]
     }));
     setProgressText("");
   }
@@ -92,6 +113,12 @@ function App() {
     setTasks((items) => [task, ...items]);
     setShowComposer(false);
     setSelectedTaskId(task.id);
+  }
+
+  function persistDailyReview() {
+    const review = { ...dailyReview, taskDate: selectedDate, updatedAt: new Date().toISOString() };
+    setDailyReview(review);
+    void saveDailyReview(review).then(() => setReviewSaved(true));
   }
 
   const todayKey = getTaskDate();
@@ -140,8 +167,9 @@ function App() {
               {week.map((date) => { const day = new Date(`${date}T12:00:00`); return <button key={date} className={`day-cell ${date === selectedDate ? "selected" : ""}`} onClick={() => setSelectedDate(date)}><span>{["日", "一", "二", "三", "四", "五", "六"][day.getDay()]}</span><b>{day.getDate()}</b><i className={tasks.some((task) => !task.completedAt && isDueOn(task, date)) ? "has-tasks" : ""} /></button>; })}
             </div>
             <div className="progress-overview"><div className="progress-ring" style={{ "--progress": `${completion * 3.6}deg` } as React.CSSProperties}><span>{completion}%</span></div><div><strong>今日节奏刚刚好</strong><span>已完成 {completedToday} 项，待投入 {currentTasks.length} 项</span></div><div className="overview-stat"><b>{Math.round(currentTasks.reduce((total, task) => total + task.estimateMinutes, 0) / 60 * 10) / 10}h</b><span>预计专注</span></div><div className="overview-stat"><b>{carriedTasks.length}</b><span>延续事项</span></div></div>
-            {carriedTasks.length > 0 && <TaskGroup title="从之前延续" subtitle="没有关系，今天可以重新安排它们。" icon={<Clock3 size={18} />} tasks={carriedTasks} selectedId={selectedTaskId} onSelect={setSelectedTaskId} onComplete={completeTask} selectedDate={selectedDate} />}
-            <TaskGroup title="今日计划" subtitle="为今天留出一点空间和专注。" icon={<Sparkles size={18} />} tasks={plannedTasks} selectedId={selectedTaskId} onSelect={setSelectedTaskId} onComplete={completeTask} selectedDate={selectedDate} />
+            {carriedTasks.length > 0 && <TaskGroup title="从之前延续" subtitle="没有关系，今天可以重新安排它们。" icon={<Clock3 size={18} />} tasks={carriedTasks} selectedId={selectedTaskId} onSelect={setSelectedTaskId} onComplete={completeTask} onCompleteToday={addProgress} selectedDate={selectedDate} />}
+            <TaskGroup title="今日计划" subtitle="为今天留出一点空间和专注。" icon={<Sparkles size={18} />} tasks={plannedTasks} selectedId={selectedTaskId} onSelect={setSelectedTaskId} onComplete={completeTask} onCompleteToday={addProgress} selectedDate={selectedDate} />
+            <DailyReviewSection review={dailyReview} onChange={setDailyReview} onSave={persistDailyReview} saved={reviewSaved} />
             <button className="quiet-add" onClick={() => setShowComposer(true)}><Plus size={17} />添加一件想完成的事</button>
           </section>
         ) : <WorkspaceView view={view} tasks={tasks} selectedDate={selectedDate} onSelectTask={setSelectedTaskId} />}
@@ -153,18 +181,23 @@ function App() {
   );
 }
 
-function TaskGroup({ title, subtitle, icon, tasks, selectedId, onSelect, onComplete, selectedDate }: { title: string; subtitle: string; icon: React.ReactNode; tasks: Task[]; selectedId: string | null; onSelect: (id: string) => void; onComplete: (id: string) => void; selectedDate: string }) {
-  return <section className="task-group"><div className="group-heading"><div className="group-title"><span>{icon}</span><div><h2>{title}</h2><p>{subtitle}</p></div></div><span className="group-count">{tasks.length}</span></div><div className="task-list">{tasks.length === 0 ? <div className="empty-line">这里留一点空白给自己。</div> : tasks.map((task) => <TaskRow key={task.id} task={task} selected={selectedId === task.id} onSelect={onSelect} onComplete={onComplete} selectedDate={selectedDate} />)}</div></section>;
+function TaskGroup({ title, subtitle, icon, tasks, selectedId, onSelect, onComplete, onCompleteToday, selectedDate }: { title: string; subtitle: string; icon: React.ReactNode; tasks: Task[]; selectedId: string | null; onSelect: (id: string) => void; onComplete: (id: string) => void; onCompleteToday: (id: string, completedToday: boolean) => void; selectedDate: string }) {
+  return <section className="task-group"><div className="group-heading"><div className="group-title"><span>{icon}</span><div><h2>{title}</h2><p>{subtitle}</p></div></div><span className="group-count">{tasks.length}</span></div><div className="task-list">{tasks.length === 0 ? <div className="empty-line">这里留一点空白给自己。</div> : tasks.map((task) => <TaskRow key={task.id} task={task} selected={selectedId === task.id} onSelect={onSelect} onComplete={onComplete} onCompleteToday={onCompleteToday} selectedDate={selectedDate} />)}</div></section>;
 }
 
-function TaskRow({ task, selected, onSelect, onComplete, selectedDate }: { task: Task; selected: boolean; onSelect: (id: string) => void; onComplete: (id: string) => void; selectedDate: string }) {
+function TaskRow({ task, selected, onSelect, onComplete, onCompleteToday, selectedDate }: { task: Task; selected: boolean; onSelect: (id: string) => void; onComplete: (id: string) => void; onCompleteToday?: (id: string, completedToday: boolean) => void; selectedDate: string }) {
   const days = dateDiff(task.plannedDate, selectedDate);
-  return <div className={`task-row ${selected ? "selected" : ""}`}><button className="check-button" title="完成原任务" onClick={() => onComplete(task.id)}><Circle size={20} /></button><button className="task-row-main" onClick={() => onSelect(task.id)}><div className="task-line"><strong>{task.title}</strong>{task.repeat !== "none" && <span className="repeat-chip">{repeatLabel[task.repeat]}</span>}</div><div className="task-meta"><span className={`priority-dot ${task.priority}`} />{task.project && <span>{task.project}</span>}{task.estimateMinutes > 0 && <span><Clock3 size={13} />{task.estimateMinutes} 分钟</span>}{days > 0 && <span className="carry-label">已延续 {days} 天</span>}</div></button><button className="more-button" onClick={() => onSelect(task.id)} title="查看详情"><MoreHorizontal size={19} /></button></div>;
+  const canCompleteToday = task.repeat !== "none" || days > 0;
+  return <div className={`task-row ${selected ? "selected" : ""}`}><button className="check-button" title={canCompleteToday ? "完成今日执行" : "完成原任务"} onClick={() => { if (canCompleteToday) onCompleteToday?.(task.id, true); else onComplete(task.id); }}>{canCompleteToday ? <Check size={20} /> : <Circle size={20} />}</button><button className="task-row-main" onClick={() => onSelect(task.id)}><div className="task-line"><strong>{task.title}</strong>{task.repeat !== "none" && <span className="repeat-chip">{repeatLabel[task.repeat]}</span>}</div><div className="task-meta"><span className={`priority-dot ${task.priority}`} />{task.project && <span>{task.project}</span>}{task.estimateMinutes > 0 && <span><Clock3 size={13} />{task.estimateMinutes} 分钟</span>}{days > 0 && <span className="carry-label">已延续 {days} 天</span>}</div></button><button className="more-button" onClick={() => onSelect(task.id)} title="查看详情"><MoreHorizontal size={19} /></button></div>;
+}
+
+function DailyReviewSection({ review, onChange, onSave, saved }: { review: DailyReview; onChange: (review: DailyReview) => void; onSave: () => void; saved: boolean }) {
+  return <section className="daily-review"><div className="review-heading"><div><p className="eyebrow">一天的收尾</p><h2>每日复盘</h2><span>留下一点感受，让明天更从容。</span></div><button className="review-save" onClick={onSave}>{saved ? <Check size={15} /> : null}{saved ? "已保存" : "保存复盘"}</button></div><div className="review-fields"><label><span>今天有哪些进展或困难？</span><textarea value={review.reflection} onChange={(event) => onChange({ ...review, reflection: event.target.value })} placeholder="例如：上午专注度很好，下午被临时事项打断。" /></label><label><span>明天最想优先完成什么？</span><textarea value={review.tomorrowFocus} onChange={(event) => onChange({ ...review, tomorrowFocus: event.target.value })} placeholder="给明天留下一件最重要的小事。" /></label></div></section>;
 }
 
 function TaskDetail({ task, selectedDate, progressText, onProgressTextChange, onAddProgress, onComplete, onClose }: { task: Task; selectedDate: string; progressText: string; onProgressTextChange: (value: string) => void; onAddProgress: (taskId: string, completedToday: boolean) => void; onComplete: (taskId: string) => void; onClose: () => void }) {
   const entries = [...task.progress].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  return <aside className="detail-panel"><header><button className="icon-button" title="关闭详情" onClick={onClose}><X size={19} /></button><button className="detail-complete" onClick={() => onComplete(task.id)}><Check size={16} />完成原任务</button></header><div className="detail-content"><div className="detail-project"><FolderKanban size={15} />{task.project || "收集箱"}</div><h2>{task.title}</h2>{task.description && <p className="detail-description">{task.description}</p>}<div className="detail-info"><div><span>任务日</span><strong>{formatTaskDate(task.plannedDate)}</strong></div><div><span>预计用时</span><strong>{task.estimateMinutes} 分钟</strong></div><div><span>重复</span><strong>{repeatLabel[task.repeat]}</strong></div></div><section className="subtasks"><div className="detail-section-title"><h3>子任务</h3><span>{task.subtasks.filter((item) => item.completed).length}/{task.subtasks.length}</span></div>{task.subtasks.length ? task.subtasks.map((item) => <div className="subtask" key={item.id}>{item.completed ? <CheckCircle2 size={17} /> : <Circle size={17} />}<span>{item.title}</span></div>) : <p className="empty-copy">还没有子任务。</p>}</section><section className="progress-section"><div className="detail-section-title"><h3>每日进展</h3><span>{entries.length} 条记录</span></div><div className="progress-composer"><textarea value={progressText} onChange={(event) => onProgressTextChange(event.target.value)} placeholder={`写下 ${formatTaskDate(selectedDate)} 的进展...`} /><div><span>记录不会自动完成原任务</span><button onClick={() => onAddProgress(task.id, false)}>添加进展</button></div></div><div className="timeline">{entries.length ? entries.map((entry) => <div className="timeline-entry" key={entry.id}><span className="timeline-dot" /><div><div className="timeline-date">{formatTaskDate(entry.taskDate)}{entry.completedToday && <em>今日完成</em>}</div><p>{entry.content}</p></div></div>) : <p className="empty-copy">从今天的一点进展开始吧。</p>}</div></section></div></aside>;
+  return <aside className="detail-panel"><header><button className="icon-button" title="关闭详情" onClick={onClose}><X size={19} /></button><div className="detail-actions"><button className="detail-today" onClick={() => onAddProgress(task.id, true)}><CheckCircle2 size={16} />完成今日执行</button><button className="detail-complete" onClick={() => onComplete(task.id)}><Check size={16} />完成原任务</button></div></header><div className="detail-content"><div className="detail-project"><FolderKanban size={15} />{task.project || "收集箱"}</div><h2>{task.title}</h2>{task.description && <p className="detail-description">{task.description}</p>}<div className="detail-info"><div><span>任务日</span><strong>{formatTaskDate(task.plannedDate)}</strong></div><div><span>预计用时</span><strong>{task.estimateMinutes} 分钟</strong></div><div><span>重复</span><strong>{repeatLabel[task.repeat]}</strong></div></div><section className="subtasks"><div className="detail-section-title"><h3>子任务</h3><span>{task.subtasks.filter((item) => item.completed).length}/{task.subtasks.length}</span></div>{task.subtasks.length ? task.subtasks.map((item) => <div className="subtask" key={item.id}>{item.completed ? <CheckCircle2 size={17} /> : <Circle size={17} />}<span>{item.title}</span></div>) : <p className="empty-copy">还没有子任务。</p>}</section><section className="progress-section"><div className="detail-section-title"><h3>每日进展</h3><span>{entries.length} 条记录</span></div><div className="progress-composer"><textarea value={progressText} onChange={(event) => onProgressTextChange(event.target.value)} placeholder={`写下 ${formatTaskDate(selectedDate)} 的进展...`} /><div><span>记录不会自动完成原任务</span><button onClick={() => onAddProgress(task.id, false)}>添加进展</button></div></div><div className="timeline">{entries.length ? entries.map((entry) => <div className="timeline-entry" key={entry.id}><span className="timeline-dot" /><div><div className="timeline-date">{formatTaskDate(entry.taskDate)}{entry.completedToday && <em>今日完成</em>}</div><p>{entry.content}</p></div></div>) : <p className="empty-copy">从今天的一点进展开始吧。</p>}</div></section></div></aside>;
 }
 
 function TaskComposer({ selectedDate, onClose, onSubmit }: { selectedDate: string; onClose: () => void; onSubmit: (form: FormData) => void }) {
@@ -174,7 +207,7 @@ function TaskComposer({ selectedDate, onClose, onSubmit }: { selectedDate: strin
 function WorkspaceView({ view, tasks, selectedDate, onSelectTask }: { view: Exclude<View, "today">; tasks: Task[]; selectedDate: string; onSelectTask: (id: string) => void }) {
   const activeTasks = tasks.filter((task) => !task.completedAt);
   const title: Record<Exclude<View, "today">, string> = { calendar: "日历", tasks: "全部任务", projects: "项目", insights: "复盘与统计", settings: "设置" };
-  if (view === "settings") return <section className="workspace-page"><p className="eyebrow">偏好设置</p><h1>让系统配合你的节奏。</h1><div className="settings-list"><div><div><Clock3 size={18} /><span>任务日结算时间</span></div><strong>北京时间 04:00</strong></div><div><div><Archive size={18} /><span>数据存储</span></div><strong>本地数据库（准备接入）</strong></div><div><div><CheckCircle2 size={18} /><span>应用版本</span></div><strong>v0.1.0</strong></div></div></section>;
+  if (view === "settings") return <section className="workspace-page"><p className="eyebrow">偏好设置</p><h1>让系统配合你的节奏。</h1><div className="settings-list"><div><div><Clock3 size={18} /><span>任务日结算时间</span></div><strong>北京时间 04:00</strong></div><div><div><Archive size={18} /><span>数据存储</span></div><strong>{usesSqlite() ? "SQLite 本地数据库" : "浏览器本地存储（预览模式）"}</strong></div><div><div><CheckCircle2 size={18} /><span>应用版本</span></div><strong>v0.1.0</strong></div></div></section>;
   return <section className="workspace-page"><p className="eyebrow">{view === "calendar" ? formatTaskDate(selectedDate) : "工作总览"}</p><h1>{title[view]}</h1>{view === "projects" ? <div className="project-grid">{["毕业论文", "任务规划系统", "照顾自己"].map((project, index) => { const projectTasks = activeTasks.filter((task) => task.project === project); return <button className="project-card" key={project}><span className={`project-symbol project-${index}`}><FolderKanban size={20} /></span><h3>{project}</h3><p>{projectTasks.length} 项进行中</p><div className="mini-progress"><i style={{ width: `${[64, 42, 78][index]}%` }} /></div></button>; })}</div> : <div className="workspace-list">{activeTasks.length ? activeTasks.map((task) => <TaskRow key={task.id} task={task} selected={false} onSelect={onSelectTask} onComplete={() => undefined} selectedDate={selectedDate} />) : <div className="empty-workspace">还没有任务，先为今天留下一件小事吧。</div>}</div>}</section>;
 }
 

@@ -32,3 +32,9 @@ export interface Task {
   createdAt: string;
 }
 
+export interface DailyReview {
+  taskDate: string;
+  reflection: string;
+  tomorrowFocus: string;
+  updatedAt: string;
+}
