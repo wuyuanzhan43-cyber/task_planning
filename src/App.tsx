@@ -9,10 +9,12 @@ import {
 } from "lucide-react";
 import { sampleTasks } from "./data/sample";
 import { dateDiff, formatTaskDate, getTaskDate, toDateKey } from "./lib/task-date";
-import { loadDailyReview, loadDailyReviews, loadTasks, saveDailyReview, saveTasks, usesSqlite } from "./lib/storage";
+import { loadAllDailyReviews, loadDailyReview, loadDailyReviews, loadTasks, replaceDailyReviews, saveDailyReview, saveTasks, usesSqlite } from "./lib/storage";
 import type { DailyReview, Priority, RepeatRule, Task, TimeBlock } from "./types";
 
 type View = "today" | "calendar" | "tasks" | "projects" | "insights" | "settings";
+type UndoState = { label: string; tasks: Task[] } | null;
+const AUTO_BACKUP_KEY = "dayflow.auto-backups.v1";
 
 const navigation: Array<{ id: View; label: string; icon: typeof CalendarDays }> = [
   { id: "today", label: "今日", icon: Sparkles },
@@ -56,6 +58,7 @@ function App() {
   const [progressText, setProgressText] = useState("");
   const [dailyReview, setDailyReview] = useState<DailyReview>({ taskDate: selectedDate, reflection: "", tomorrowFocus: "", updatedAt: "" });
   const [reviewSaved, setReviewSaved] = useState(false);
+  const [undo, setUndo] = useState<UndoState>(null);
   const savedTasksRef = useRef<Task[]>([]);
   const saveQueueRef = useRef(Promise.resolve());
 
@@ -75,6 +78,14 @@ function App() {
     saveQueueRef.current = saveQueueRef.current
       .then(() => saveTasks(tasks, previousTasks))
       .catch(() => undefined);
+  }, [loaded, tasks]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    try {
+      const backups = JSON.parse(localStorage.getItem(AUTO_BACKUP_KEY) ?? "[]") as Array<{ createdAt: string; tasks: Task[] }>;
+      localStorage.setItem(AUTO_BACKUP_KEY, JSON.stringify([{ createdAt: new Date().toISOString(), tasks }, ...backups].slice(0, 5)));
+    } catch { /* Backup is best effort and must not interrupt task saving. */ }
   }, [loaded, tasks]);
 
   useEffect(() => {
@@ -102,11 +113,13 @@ function App() {
   }
 
   function completeTask(taskId: string) {
+    setUndo({ label: "已完成任务", tasks });
     updateTask(taskId, (task) => ({ ...task, completedAt: new Date().toISOString() }));
     setSelectedTaskId(null);
   }
 
   function completeTasks(taskIds: string[]) {
+    setUndo({ label: `已完成 ${taskIds.length} 项任务`, tasks });
     const selected = new Set(taskIds);
     const completedAt = new Date().toISOString();
     setTasks((items) => items.map((task) => selected.has(task.id) && !task.completedAt ? { ...task, completedAt } : task));
@@ -124,6 +137,7 @@ function App() {
   function deleteTask(taskId: string) {
     const task = tasks.find((item) => item.id === taskId);
     if (!task || !window.confirm(`确定删除“${task.title}”吗？此操作无法撤销。`)) return;
+    setUndo({ label: "已删除任务", tasks });
     setTasks((items) => items.filter((item) => item.id !== taskId));
     setSelectedTaskId(null);
     setEditingTaskId(null);
@@ -132,6 +146,7 @@ function App() {
   function deleteTasks(taskIds: string[]) {
     const selected = new Set(taskIds);
     if (!selected.size || !window.confirm(`确定删除选中的 ${selected.size} 项任务吗？此操作无法撤销。`)) return false;
+    setUndo({ label: `已删除 ${selected.size} 项任务`, tasks });
     setTasks((items) => items.filter((task) => !selected.has(task.id)));
     setSelectedTaskId((id) => id && selected.has(id) ? null : id);
     return true;
@@ -191,6 +206,7 @@ function App() {
   }
 
   function rescheduleTasks(taskIds: string[], targetDate: string) {
+    setUndo({ label: `已调整 ${taskIds.length} 项任务`, tasks });
     const selected = new Set(taskIds);
     const changedAt = new Date().toISOString();
     setTasks((items) => items.map((task) => {
@@ -240,6 +256,33 @@ function App() {
     const review = { ...dailyReview, taskDate: selectedDate, updatedAt: new Date().toISOString() };
     setDailyReview(review);
     void saveDailyReview(review).then(() => setReviewSaved(true));
+  }
+
+  async function exportData() {
+    const reviews = await loadAllDailyReviews();
+    const blob = new Blob([JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), tasks, dailyReviews: reviews }, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `dayflow-backup-${getTaskDate()}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function importData(file: File) {
+    try {
+      const data = JSON.parse(await file.text()) as { tasks?: Task[]; dailyReviews?: DailyReview[] };
+      if (!Array.isArray(data.tasks)) throw new Error("invalid backup");
+      setUndo({ label: "已导入备份", tasks });
+      setTasks(data.tasks);
+      if (Array.isArray(data.dailyReviews)) await replaceDailyReviews(data.dailyReviews);
+    } catch { window.alert("无法读取备份文件，请选择 Dayflow 导出的 JSON 文件。"); }
+  }
+
+  function restoreUndo() {
+    if (!undo) return;
+    setTasks(undo.tasks);
+    setUndo(null);
   }
 
   const todayKey = getTaskDate();
@@ -295,12 +338,13 @@ function App() {
             <DailyReviewSection review={dailyReview} onChange={setDailyReview} onSave={persistDailyReview} saved={reviewSaved} />
             <button className="quiet-add" onClick={() => setShowComposer(true)}><Plus size={17} />添加一件想完成的事</button>
           </section>
-        ) : <WorkspaceView view={view} tasks={tasks} selectedDate={selectedDate} onSelectTask={setSelectedTaskId} onSelectDate={setSelectedDate} onReschedule={rescheduleTask} onCompleteTasks={completeTasks} onDeleteTasks={deleteTasks} onRescheduleTasks={rescheduleTasks} />}
+        ) : <WorkspaceView view={view} tasks={tasks} selectedDate={selectedDate} onSelectTask={setSelectedTaskId} onSelectDate={setSelectedDate} onReschedule={rescheduleTask} onCompleteTasks={completeTasks} onDeleteTasks={deleteTasks} onRescheduleTasks={rescheduleTasks} onExportData={exportData} onImportData={importData} />}
       </main>
 
       {selectedTask && <TaskDetail task={selectedTask} selectedDate={selectedDate} progressText={progressText} onProgressTextChange={setProgressText} onAddProgress={addProgress} onComplete={completeTask} onEdit={() => setEditingTaskId(selectedTask.id)} onDelete={deleteTask} onAddSubtask={addSubtask} onToggleSubtask={toggleSubtask} onDeleteSubtask={deleteSubtask} onClose={() => setSelectedTaskId(null)} />}
       {showComposer && <TaskComposer selectedDate={selectedDate} onClose={() => setShowComposer(false)} onSubmit={createTask} />}
       {editingTaskId && tasks.find((task) => task.id === editingTaskId) && <TaskComposer task={tasks.find((task) => task.id === editingTaskId)!} selectedDate={selectedDate} onClose={() => setEditingTaskId(null)} onSubmit={(form) => saveTask(editingTaskId, form)} />}
+      {undo && <div className="undo-toast"><span>{undo.label}</span><button onClick={restoreUndo}>撤销</button><button title="关闭" onClick={() => setUndo(null)}><X size={15} /></button></div>}
     </div>
   );
 }
@@ -363,12 +407,16 @@ function calendarDates(anchor: string, mode: CalendarMode): string[] {
 
 type CalendarMode = "month" | "week" | "day";
 
-function WorkspaceView({ view, tasks, selectedDate, onSelectTask, onSelectDate, onReschedule, onCompleteTasks, onDeleteTasks, onRescheduleTasks }: { view: Exclude<View, "today">; tasks: Task[]; selectedDate: string; onSelectTask: (id: string) => void; onSelectDate: (date: string) => void; onReschedule: (taskId: string, targetDate: string) => void; onCompleteTasks: (taskIds: string[]) => void; onDeleteTasks: (taskIds: string[]) => boolean; onRescheduleTasks: (taskIds: string[], targetDate: string) => void }) {
-  if (view === "settings") return <section className="workspace-page"><p className="eyebrow">偏好设置</p><h1>让系统配合你的节奏。</h1><div className="settings-list"><div><div><Clock3 size={18} /><span>任务日结算时间</span></div><strong>北京时间 04:00</strong></div><div><div><Archive size={18} /><span>数据存储</span></div><strong>{usesSqlite() ? "SQLite 本地数据库" : "浏览器本地存储（预览模式）"}</strong></div><div><div><CheckCircle2 size={18} /><span>应用版本</span></div><strong>v0.3.0</strong></div></div></section>;
+function WorkspaceView({ view, tasks, selectedDate, onSelectTask, onSelectDate, onReschedule, onCompleteTasks, onDeleteTasks, onRescheduleTasks, onExportData, onImportData }: { view: Exclude<View, "today">; tasks: Task[]; selectedDate: string; onSelectTask: (id: string) => void; onSelectDate: (date: string) => void; onReschedule: (taskId: string, targetDate: string) => void; onCompleteTasks: (taskIds: string[]) => void; onDeleteTasks: (taskIds: string[]) => boolean; onRescheduleTasks: (taskIds: string[], targetDate: string) => void; onExportData: () => Promise<void>; onImportData: (file: File) => Promise<void> }) {
+  if (view === "settings") return <SettingsWorkspace onExportData={onExportData} onImportData={onImportData} />;
   if (view === "calendar") return <CalendarWorkspace tasks={tasks} selectedDate={selectedDate} onSelectDate={onSelectDate} onSelectTask={onSelectTask} onReschedule={onReschedule} />;
   if (view === "projects") return <ProjectsWorkspace tasks={tasks} onSelectTask={onSelectTask} />;
   if (view === "insights") return <InsightsWorkspace tasks={tasks} selectedDate={selectedDate} />;
   return <TasksWorkspace tasks={tasks} selectedDate={selectedDate} onSelectTask={onSelectTask} onCompleteTasks={onCompleteTasks} onDeleteTasks={onDeleteTasks} onRescheduleTasks={onRescheduleTasks} />;
+}
+
+function SettingsWorkspace({ onExportData, onImportData }: { onExportData: () => Promise<void>; onImportData: (file: File) => Promise<void> }) {
+  return <section className="workspace-page settings-workspace"><p className="eyebrow">偏好设置</p><h1>让系统配合你的节奏。</h1><div className="settings-list"><div><div><Clock3 size={18} /><span>任务日结算时间</span></div><strong>北京时间 04:00</strong></div><div><div><Archive size={18} /><span>数据存储</span></div><strong>{usesSqlite() ? "SQLite 本地数据库" : "浏览器本地存储（预览模式）"}</strong></div><div><div><CheckCircle2 size={18} /><span>应用版本</span></div><strong>v0.3.0</strong></div></div><section className="backup-panel"><div><p className="eyebrow">数据安全</p><h2>备份与恢复</h2><span>每次任务变更会在本机保留最近 5 份自动快照。</span></div><div className="backup-actions"><button className="primary-button" onClick={() => void onExportData()}><Archive size={16} />导出备份</button><label className="import-button"><span>导入备份</span><input type="file" accept="application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) void onImportData(file); event.currentTarget.value = ""; }} /></label></div></section></section>;
 }
 
 function TasksWorkspace({ tasks, selectedDate, onSelectTask, onCompleteTasks, onDeleteTasks, onRescheduleTasks }: { tasks: Task[]; selectedDate: string; onSelectTask: (taskId: string) => void; onCompleteTasks: (taskIds: string[]) => void; onDeleteTasks: (taskIds: string[]) => boolean; onRescheduleTasks: (taskIds: string[], targetDate: string) => void }) {
