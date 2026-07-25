@@ -16,6 +16,11 @@ fn main() {
                         description: "add_daily_reviews",
                         sql: include_str!("../migrations/0002_daily_reviews.sql"),
                         kind: MigrationKind::Up,
+                    }, Migration {
+                        version: 3,
+                        description: "add_planning_features",
+                        sql: include_str!("../migrations/0003_planning_features.sql"),
+                        kind: MigrationKind::Up,
                     }],
                 )
                 .build(),

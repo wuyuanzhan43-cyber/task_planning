@@ -1,5 +1,6 @@
 export type Priority = "high" | "medium" | "low";
 export type RepeatRule = "none" | "daily" | "weekdays" | "weekly" | "monthly";
+export type TimeBlock = "morning" | "afternoon" | "evening" | "unscheduled";
 
 export interface ProgressEntry {
   id: string;
@@ -24,6 +25,8 @@ export interface Task {
   priority: Priority;
   plannedDate: string;
   dueAt?: string;
+  timeBlock: TimeBlock;
+  isFocus: boolean;
   estimateMinutes: number;
   repeat: RepeatRule;
   completedAt?: string;
@@ -31,6 +34,9 @@ export interface Task {
   subtasks: Subtask[];
   createdAt: string;
 }
+
+export interface Milestone { id: string; title: string; completed: boolean; }
+export interface ProjectPlan { id: string; name: string; targetDate?: string; milestones: Milestone[]; }
 
 export interface DailyReview {
   taskDate: string;

@@ -1,16 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { DndContext, type DragEndEvent, useDraggable, useDroppable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
 import {
   Archive, BarChart3, Bell, CalendarDays, Check, CheckCircle2, ChevronLeft,
   ChevronRight, Circle, Clock3, FolderKanban, ListTodo, MoreHorizontal,
   Plus, Search, Settings, Sparkles, Target, X, CalendarRange, GripVertical,
-  LayoutGrid, TrendingUp
+  LayoutGrid, Pencil, Trash2, TrendingUp
 } from "lucide-react";
 import { sampleTasks } from "./data/sample";
 import { dateDiff, formatTaskDate, getTaskDate, toDateKey } from "./lib/task-date";
 import { loadDailyReview, loadDailyReviews, loadTasks, saveDailyReview, saveTasks, usesSqlite } from "./lib/storage";
-import type { DailyReview, Priority, RepeatRule, Task } from "./types";
+import type { DailyReview, Priority, RepeatRule, Task, TimeBlock } from "./types";
 
 type View = "today" | "calendar" | "tasks" | "projects" | "insights" | "settings";
 
@@ -24,6 +24,7 @@ const navigation: Array<{ id: View; label: string; icon: typeof CalendarDays }> 
 
 const priorityLabel: Record<Priority, string> = { high: "重要", medium: "正常", low: "轻缓" };
 const repeatLabel: Record<RepeatRule, string> = { none: "不重复", daily: "每天", weekdays: "工作日", weekly: "每周", monthly: "每月" };
+const timeBlockLabel: Record<TimeBlock, string> = { morning: "上午", afternoon: "下午", evening: "晚上", unscheduled: "待安排" };
 
 function isDueOn(task: Task, date: string): boolean {
   if (date < task.plannedDate) return false;
@@ -51,19 +52,29 @@ function App() {
   const [selectedDate, setSelectedDate] = useState(getTaskDate());
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [showComposer, setShowComposer] = useState(false);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [progressText, setProgressText] = useState("");
   const [dailyReview, setDailyReview] = useState<DailyReview>({ taskDate: selectedDate, reflection: "", tomorrowFocus: "", updatedAt: "" });
   const [reviewSaved, setReviewSaved] = useState(false);
+  const savedTasksRef = useRef<Task[]>([]);
+  const saveQueueRef = useRef(Promise.resolve());
 
   useEffect(() => {
     void loadTasks().then((saved) => {
-      setTasks(saved.length > 0 ? saved : (import.meta.env.DEV ? sampleTasks : []));
+      const initialTasks = saved.length > 0 ? saved : (import.meta.env.DEV ? sampleTasks : []);
+      savedTasksRef.current = initialTasks;
+      setTasks(initialTasks);
       setLoaded(true);
     }).catch(() => setLoaded(true));
   }, []);
 
   useEffect(() => {
-    if (loaded) void saveTasks(tasks);
+    if (!loaded) return;
+    const previousTasks = savedTasksRef.current;
+    savedTasksRef.current = tasks;
+    saveQueueRef.current = saveQueueRef.current
+      .then(() => saveTasks(tasks, previousTasks))
+      .catch(() => undefined);
   }, [loaded, tasks]);
 
   useEffect(() => {
@@ -78,8 +89,13 @@ function App() {
   );
   const carriedTasks = currentTasks.filter((task) => task.repeat === "none" && task.plannedDate < selectedDate);
   const plannedTasks = currentTasks.filter((task) => !carriedTasks.includes(task));
-  const completedToday = tasks.filter((task) => task.completedAt?.slice(0, 10) === selectedDate).length;
-  const completion = currentTasks.length ? Math.round((completedToday / (currentTasks.length + completedToday)) * 100) : 0;
+  const completedToday = tasks.filter((task) =>
+    task.completedAt?.slice(0, 10) === selectedDate || (task.repeat !== "none" && completedExecutionOn(task, selectedDate))
+  ).length;
+  const totalToday = currentTasks.length + completedToday;
+  const completion = totalToday ? Math.round((completedToday / totalToday) * 100) : 0;
+  const focusTasks = currentTasks.filter((task) => task.isFocus);
+  const plannedMinutes = currentTasks.reduce((total, task) => total + task.estimateMinutes, 0);
 
   function updateTask(taskId: string, update: (task: Task) => Task) {
     setTasks((items) => items.map((task) => task.id === taskId ? update(task) : task));
@@ -88,6 +104,74 @@ function App() {
   function completeTask(taskId: string) {
     updateTask(taskId, (task) => ({ ...task, completedAt: new Date().toISOString() }));
     setSelectedTaskId(null);
+  }
+
+  function completeTasks(taskIds: string[]) {
+    const selected = new Set(taskIds);
+    const completedAt = new Date().toISOString();
+    setTasks((items) => items.map((task) => selected.has(task.id) && !task.completedAt ? { ...task, completedAt } : task));
+  }
+
+  function toggleFocus(taskId: string) {
+    const focusCount = currentTasks.filter((task) => task.isFocus).length;
+    updateTask(taskId, (task) => ({ ...task, isFocus: task.isFocus ? false : focusCount < 3 }));
+  }
+
+  function assignTimeBlock(taskId: string, timeBlock: TimeBlock) {
+    updateTask(taskId, (task) => ({ ...task, timeBlock }));
+  }
+
+  function deleteTask(taskId: string) {
+    const task = tasks.find((item) => item.id === taskId);
+    if (!task || !window.confirm(`确定删除“${task.title}”吗？此操作无法撤销。`)) return;
+    setTasks((items) => items.filter((item) => item.id !== taskId));
+    setSelectedTaskId(null);
+    setEditingTaskId(null);
+  }
+
+  function deleteTasks(taskIds: string[]) {
+    const selected = new Set(taskIds);
+    if (!selected.size || !window.confirm(`确定删除选中的 ${selected.size} 项任务吗？此操作无法撤销。`)) return false;
+    setTasks((items) => items.filter((task) => !selected.has(task.id)));
+    setSelectedTaskId((id) => id && selected.has(id) ? null : id);
+    return true;
+  }
+
+  function saveTask(taskId: string, form: FormData) {
+    const title = String(form.get("title") || "").trim();
+    if (!title) return;
+    updateTask(taskId, (task) => ({
+      ...task,
+      title,
+      description: String(form.get("description") || "").trim(),
+      project: String(form.get("project") || "收集箱").trim() || "收集箱",
+      tags: String(form.get("tags") || "").split("，").map((item) => item.trim()).filter(Boolean),
+      priority: String(form.get("priority") || "medium") as Priority,
+      plannedDate: String(form.get("plannedDate") || task.plannedDate),
+      estimateMinutes: Number(form.get("estimateMinutes") || 0),
+      repeat: String(form.get("repeat") || "none") as RepeatRule,
+      dueAt: String(form.get("dueAt") || "") || undefined,
+      timeBlock: String(form.get("timeBlock") || "unscheduled") as TimeBlock,
+      isFocus: form.get("isFocus") === "on"
+    }));
+    setEditingTaskId(null);
+  }
+
+  function addSubtask(taskId: string, title: string) {
+    const value = title.trim();
+    if (!value) return;
+    updateTask(taskId, (task) => ({ ...task, subtasks: [...task.subtasks, { id: makeId("subtask"), title: value, completed: false }] }));
+  }
+
+  function toggleSubtask(taskId: string, subtaskId: string) {
+    updateTask(taskId, (task) => ({
+      ...task,
+      subtasks: task.subtasks.map((subtask) => subtask.id === subtaskId ? { ...subtask, completed: !subtask.completed } : subtask)
+    }));
+  }
+
+  function deleteSubtask(taskId: string, subtaskId: string) {
+    updateTask(taskId, (task) => ({ ...task, subtasks: task.subtasks.filter((subtask) => subtask.id !== subtaskId) }));
   }
 
   function rescheduleTask(taskId: string, targetDate: string) {
@@ -104,6 +188,23 @@ function App() {
         }]
       };
     });
+  }
+
+  function rescheduleTasks(taskIds: string[], targetDate: string) {
+    const selected = new Set(taskIds);
+    const changedAt = new Date().toISOString();
+    setTasks((items) => items.map((task) => {
+      if (!selected.has(task.id) || task.plannedDate === targetDate) return task;
+      return {
+        ...task,
+        plannedDate: targetDate,
+        progress: [...task.progress, {
+          id: makeId("progress"), taskDate: getTaskDate(),
+          content: `计划从 ${formatTaskDate(task.plannedDate)} 调整至 ${formatTaskDate(targetDate)}。`,
+          completedToday: false, createdAt: changedAt
+        }]
+      };
+    }));
   }
 
   function addProgress(taskId: string, completedToday: boolean) {
@@ -126,7 +227,8 @@ function App() {
       id: makeId("task"), title, description: String(form.get("description") || "").trim(),
       project: String(form.get("project") || "收集箱"), tags: String(form.get("tags") || "").split("，").map((item) => item.trim()).filter(Boolean),
       priority: String(form.get("priority") || "medium") as Priority,
-      plannedDate: String(form.get("plannedDate") || selectedDate), estimateMinutes: Number(form.get("estimateMinutes") || 30),
+      plannedDate: String(form.get("plannedDate") || selectedDate), dueAt: String(form.get("dueAt") || "") || undefined,
+      timeBlock: String(form.get("timeBlock") || "unscheduled") as TimeBlock, isFocus: form.get("isFocus") === "on", estimateMinutes: Number(form.get("estimateMinutes") || 30),
       repeat: String(form.get("repeat") || "none") as RepeatRule, createdAt: new Date().toISOString(), progress: [], subtasks: []
     };
     setTasks((items) => [task, ...items]);
@@ -186,41 +288,51 @@ function App() {
               {week.map((date) => { const day = new Date(`${date}T12:00:00`); return <button key={date} className={`day-cell ${date === selectedDate ? "selected" : ""}`} onClick={() => setSelectedDate(date)}><span>{["日", "一", "二", "三", "四", "五", "六"][day.getDay()]}</span><b>{day.getDate()}</b><i className={tasks.some((task) => !task.completedAt && isDueOn(task, date)) ? "has-tasks" : ""} /></button>; })}
             </div>
             <div className="progress-overview"><div className="progress-ring" style={{ "--progress": `${completion * 3.6}deg` } as React.CSSProperties}><span>{completion}%</span></div><div><strong>今日节奏刚刚好</strong><span>已完成 {completedToday} 项，待投入 {currentTasks.length} 项</span></div><div className="overview-stat"><b>{Math.round(currentTasks.reduce((total, task) => total + task.estimateMinutes, 0) / 60 * 10) / 10}h</b><span>预计专注</span></div><div className="overview-stat"><b>{carriedTasks.length}</b><span>延续事项</span></div></div>
-            {carriedTasks.length > 0 && <TaskGroup title="从之前延续" subtitle="没有关系，今天可以重新安排它们。" icon={<Clock3 size={18} />} tasks={carriedTasks} selectedId={selectedTaskId} onSelect={setSelectedTaskId} onComplete={completeTask} onCompleteToday={addProgress} selectedDate={selectedDate} />}
+            <section className="daily-focus"><div><p className="eyebrow">今日关键三件事</p><h2>重点与容量</h2><span>{plannedMinutes > 240 ? `已超出 ${Math.round((plannedMinutes - 240) / 60 * 10) / 10} 小时，建议调整。` : `已规划 ${Math.round(plannedMinutes / 60 * 10) / 10} / 4 小时。`}</span></div><div className="focus-slots">{[0, 1, 2].map((index) => { const task = focusTasks[index]; return task ? <button className="focus-slot filled" key={task.id} onClick={() => toggleFocus(task.id)}><strong>{task.title}</strong><small>{task.estimateMinutes} 分钟</small></button> : <span className="focus-slot" key={index}>留给最重要的事</span>; })}</div><div className="focus-candidates">{currentTasks.filter((task) => !task.isFocus).slice(0, 5).map((task) => <button key={task.id} onClick={() => toggleFocus(task.id)}><Plus size={13} />{task.title}</button>)}</div></section>
+            <section className="time-block-plan"><div className="time-block-heading"><div><p className="eyebrow">把任务放进一天</p><h2>时间块</h2></div><span>为任务分配更合适的时段</span></div><div className="time-block-grid">{(["morning", "afternoon", "evening"] as TimeBlock[]).map((block) => <section key={block}><h3>{timeBlockLabel[block]}</h3>{plannedTasks.filter((task) => task.timeBlock === block).map((task) => <div className="time-block-task" key={task.id}><button onClick={() => setSelectedTaskId(task.id)}>{task.dueAt && <em>{task.dueAt}</em>}{task.title}</button><select value={task.timeBlock} onChange={(event) => assignTimeBlock(task.id, event.target.value as TimeBlock)} aria-label={`调整 ${task.title} 的时间块`}><option value="morning">上午</option><option value="afternoon">下午</option><option value="evening">晚上</option><option value="unscheduled">待安排</option></select></div>)}{!plannedTasks.some((task) => task.timeBlock === block) && <p>暂未安排</p>}</section>)}</div></section>
+            {carriedTasks.length > 0 && <TaskGroup title="逾期任务" subtitle="重新安排后，再从容地继续。" icon={<Clock3 size={18} />} tasks={carriedTasks} selectedId={selectedTaskId} onSelect={setSelectedTaskId} onComplete={completeTask} onCompleteToday={addProgress} onReschedule={selectedDate === todayKey ? rescheduleTask : undefined} selectedDate={selectedDate} />}
             <TaskGroup title="今日计划" subtitle="为今天留出一点空间和专注。" icon={<Sparkles size={18} />} tasks={plannedTasks} selectedId={selectedTaskId} onSelect={setSelectedTaskId} onComplete={completeTask} onCompleteToday={addProgress} selectedDate={selectedDate} />
             <DailyReviewSection review={dailyReview} onChange={setDailyReview} onSave={persistDailyReview} saved={reviewSaved} />
             <button className="quiet-add" onClick={() => setShowComposer(true)}><Plus size={17} />添加一件想完成的事</button>
           </section>
-        ) : <WorkspaceView view={view} tasks={tasks} selectedDate={selectedDate} onSelectTask={setSelectedTaskId} onSelectDate={setSelectedDate} onReschedule={rescheduleTask} />}
+        ) : <WorkspaceView view={view} tasks={tasks} selectedDate={selectedDate} onSelectTask={setSelectedTaskId} onSelectDate={setSelectedDate} onReschedule={rescheduleTask} onCompleteTasks={completeTasks} onDeleteTasks={deleteTasks} onRescheduleTasks={rescheduleTasks} />}
       </main>
 
-      {selectedTask && <TaskDetail task={selectedTask} selectedDate={selectedDate} progressText={progressText} onProgressTextChange={setProgressText} onAddProgress={addProgress} onComplete={completeTask} onClose={() => setSelectedTaskId(null)} />}
+      {selectedTask && <TaskDetail task={selectedTask} selectedDate={selectedDate} progressText={progressText} onProgressTextChange={setProgressText} onAddProgress={addProgress} onComplete={completeTask} onEdit={() => setEditingTaskId(selectedTask.id)} onDelete={deleteTask} onAddSubtask={addSubtask} onToggleSubtask={toggleSubtask} onDeleteSubtask={deleteSubtask} onClose={() => setSelectedTaskId(null)} />}
       {showComposer && <TaskComposer selectedDate={selectedDate} onClose={() => setShowComposer(false)} onSubmit={createTask} />}
+      {editingTaskId && tasks.find((task) => task.id === editingTaskId) && <TaskComposer task={tasks.find((task) => task.id === editingTaskId)!} selectedDate={selectedDate} onClose={() => setEditingTaskId(null)} onSubmit={(form) => saveTask(editingTaskId, form)} />}
     </div>
   );
 }
 
-function TaskGroup({ title, subtitle, icon, tasks, selectedId, onSelect, onComplete, onCompleteToday, selectedDate }: { title: string; subtitle: string; icon: React.ReactNode; tasks: Task[]; selectedId: string | null; onSelect: (id: string) => void; onComplete: (id: string) => void; onCompleteToday: (id: string, completedToday: boolean) => void; selectedDate: string }) {
-  return <section className="task-group"><div className="group-heading"><div className="group-title"><span>{icon}</span><div><h2>{title}</h2><p>{subtitle}</p></div></div><span className="group-count">{tasks.length}</span></div><div className="task-list">{tasks.length === 0 ? <div className="empty-line">这里留一点空白给自己。</div> : tasks.map((task) => <TaskRow key={task.id} task={task} selected={selectedId === task.id} onSelect={onSelect} onComplete={onComplete} onCompleteToday={onCompleteToday} selectedDate={selectedDate} />)}</div></section>;
+function TaskGroup({ title, subtitle, icon, tasks, selectedId, onSelect, onComplete, onCompleteToday, onReschedule, selectedDate }: { title: string; subtitle: string; icon: React.ReactNode; tasks: Task[]; selectedId: string | null; onSelect: (id: string) => void; onComplete: (id: string) => void; onCompleteToday: (id: string, completedToday: boolean) => void; onReschedule?: (taskId: string, targetDate: string) => void; selectedDate: string }) {
+  return <section className="task-group"><div className="group-heading"><div className="group-title"><span>{icon}</span><div><h2>{title}</h2><p>{subtitle}</p></div></div><span className="group-count">{tasks.length}</span></div><div className="task-list">{tasks.length === 0 ? <div className="empty-line">这里留一点空白给自己。</div> : tasks.map((task) => <TaskRow key={task.id} task={task} selected={selectedId === task.id} onSelect={onSelect} onComplete={onComplete} onCompleteToday={onCompleteToday} onReschedule={onReschedule} selectedDate={selectedDate} />)}</div></section>;
 }
 
-function TaskRow({ task, selected, onSelect, onComplete, onCompleteToday, selectedDate }: { task: Task; selected: boolean; onSelect: (id: string) => void; onComplete: (id: string) => void; onCompleteToday?: (id: string, completedToday: boolean) => void; selectedDate: string }) {
+function TaskRow({ task, selected, onSelect, onComplete, onCompleteToday, onReschedule, selectedDate }: { task: Task; selected: boolean; onSelect: (id: string) => void; onComplete: (id: string) => void; onCompleteToday?: (id: string, completedToday: boolean) => void; onReschedule?: (taskId: string, targetDate: string) => void; selectedDate: string }) {
   const days = dateDiff(task.plannedDate, selectedDate);
   const canCompleteToday = task.repeat !== "none" || days > 0;
-  return <div className={`task-row ${selected ? "selected" : ""}`}><button className="check-button" title={canCompleteToday ? "完成今日执行" : "完成原任务"} onClick={() => { if (canCompleteToday) onCompleteToday?.(task.id, true); else onComplete(task.id); }}>{canCompleteToday ? <Check size={20} /> : <Circle size={20} />}</button><button className="task-row-main" onClick={() => onSelect(task.id)}><div className="task-line"><strong>{task.title}</strong>{task.repeat !== "none" && <span className="repeat-chip">{repeatLabel[task.repeat]}</span>}</div><div className="task-meta"><span className={`priority-dot ${task.priority}`} />{task.project && <span>{task.project}</span>}{task.estimateMinutes > 0 && <span><Clock3 size={13} />{task.estimateMinutes} 分钟</span>}{days > 0 && <span className="carry-label">已延续 {days} 天</span>}</div></button><button className="more-button" onClick={() => onSelect(task.id)} title="查看详情"><MoreHorizontal size={19} /></button></div>;
+  return <div className={`task-row ${selected ? "selected" : ""}`}><button className="check-button" title={canCompleteToday ? "完成今日执行" : "完成原任务"} onClick={() => { if (canCompleteToday) onCompleteToday?.(task.id, true); else onComplete(task.id); }}>{canCompleteToday ? <Check size={20} /> : <Circle size={20} />}</button><button className="task-row-main" onClick={() => onSelect(task.id)}><div className="task-line"><strong>{task.title}</strong>{task.repeat !== "none" && <span className="repeat-chip">{repeatLabel[task.repeat]}</span>}</div><div className="task-meta"><span className={`priority-dot ${task.priority}`} />{task.project && <span>{task.project}</span>}{task.estimateMinutes > 0 && <span><Clock3 size={13} />{task.estimateMinutes} 分钟</span>}{days > 0 && <span className="carry-label">已延续 {days} 天</span>}</div></button>{onReschedule && days > 0 && <div className="reschedule-actions"><button title="移至今天" onClick={() => onReschedule(task.id, selectedDate)}>今天</button><button title="移至明天" onClick={() => onReschedule(task.id, shiftDate(selectedDate, 1))}>明天</button><input aria-label="移至指定日期" type="date" value={task.plannedDate} min={selectedDate} onChange={(event) => onReschedule(task.id, event.target.value)} /></div>}<button className="more-button" onClick={() => onSelect(task.id)} title="查看详情"><MoreHorizontal size={19} /></button></div>;
 }
 
 function DailyReviewSection({ review, onChange, onSave, saved }: { review: DailyReview; onChange: (review: DailyReview) => void; onSave: () => void; saved: boolean }) {
   return <section className="daily-review"><div className="review-heading"><div><p className="eyebrow">一天的收尾</p><h2>每日复盘</h2><span>留下一点感受，让明天更从容。</span></div><button className="review-save" onClick={onSave}>{saved ? <Check size={15} /> : null}{saved ? "已保存" : "保存复盘"}</button></div><div className="review-fields"><label><span>今天有哪些进展或困难？</span><textarea value={review.reflection} onChange={(event) => onChange({ ...review, reflection: event.target.value })} placeholder="例如：上午专注度很好，下午被临时事项打断。" /></label><label><span>明天最想优先完成什么？</span><textarea value={review.tomorrowFocus} onChange={(event) => onChange({ ...review, tomorrowFocus: event.target.value })} placeholder="给明天留下一件最重要的小事。" /></label></div></section>;
 }
 
-function TaskDetail({ task, selectedDate, progressText, onProgressTextChange, onAddProgress, onComplete, onClose }: { task: Task; selectedDate: string; progressText: string; onProgressTextChange: (value: string) => void; onAddProgress: (taskId: string, completedToday: boolean) => void; onComplete: (taskId: string) => void; onClose: () => void }) {
+function TaskDetail({ task, selectedDate, progressText, onProgressTextChange, onAddProgress, onComplete, onEdit, onDelete, onAddSubtask, onToggleSubtask, onDeleteSubtask, onClose }: { task: Task; selectedDate: string; progressText: string; onProgressTextChange: (value: string) => void; onAddProgress: (taskId: string, completedToday: boolean) => void; onComplete: (taskId: string) => void; onEdit: () => void; onDelete: (taskId: string) => void; onAddSubtask: (taskId: string, title: string) => void; onToggleSubtask: (taskId: string, subtaskId: string) => void; onDeleteSubtask: (taskId: string, subtaskId: string) => void; onClose: () => void }) {
   const entries = [...task.progress].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  return <aside className="detail-panel"><header><button className="icon-button" title="关闭详情" onClick={onClose}><X size={19} /></button><div className="detail-actions"><button className="detail-today" onClick={() => onAddProgress(task.id, true)}><CheckCircle2 size={16} />完成今日执行</button><button className="detail-complete" onClick={() => onComplete(task.id)}><Check size={16} />完成原任务</button></div></header><div className="detail-content"><div className="detail-project"><FolderKanban size={15} />{task.project || "收集箱"}</div><h2>{task.title}</h2>{task.description && <p className="detail-description">{task.description}</p>}<div className="detail-info"><div><span>任务日</span><strong>{formatTaskDate(task.plannedDate)}</strong></div><div><span>预计用时</span><strong>{task.estimateMinutes} 分钟</strong></div><div><span>重复</span><strong>{repeatLabel[task.repeat]}</strong></div></div><section className="subtasks"><div className="detail-section-title"><h3>子任务</h3><span>{task.subtasks.filter((item) => item.completed).length}/{task.subtasks.length}</span></div>{task.subtasks.length ? task.subtasks.map((item) => <div className="subtask" key={item.id}>{item.completed ? <CheckCircle2 size={17} /> : <Circle size={17} />}<span>{item.title}</span></div>) : <p className="empty-copy">还没有子任务。</p>}</section><section className="progress-section"><div className="detail-section-title"><h3>每日进展</h3><span>{entries.length} 条记录</span></div><div className="progress-composer"><textarea value={progressText} onChange={(event) => onProgressTextChange(event.target.value)} placeholder={`写下 ${formatTaskDate(selectedDate)} 的进展...`} /><div><span>记录不会自动完成原任务</span><button onClick={() => onAddProgress(task.id, false)}>添加进展</button></div></div><div className="timeline">{entries.length ? entries.map((entry) => <div className="timeline-entry" key={entry.id}><span className="timeline-dot" /><div><div className="timeline-date">{formatTaskDate(entry.taskDate)}{entry.completedToday && <em>今日完成</em>}</div><p>{entry.content}</p></div></div>) : <p className="empty-copy">从今天的一点进展开始吧。</p>}</div></section></div></aside>;
+  const [subtaskTitle, setSubtaskTitle] = useState("");
+  function submitSubtask(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onAddSubtask(task.id, subtaskTitle);
+    setSubtaskTitle("");
+  }
+  return <aside className="detail-panel"><header><button className="icon-button" title="关闭详情" onClick={onClose}><X size={19} /></button><div className="detail-actions"><button className="icon-button" title="编辑任务" onClick={onEdit}><Pencil size={16} /></button><button className="icon-button danger-button" title="删除任务" onClick={() => onDelete(task.id)}><Trash2 size={16} /></button><button className="detail-today" onClick={() => onAddProgress(task.id, true)}><CheckCircle2 size={16} />完成今日执行</button><button className="detail-complete" onClick={() => onComplete(task.id)}><Check size={16} />完成原任务</button></div></header><div className="detail-content"><div className="detail-project"><FolderKanban size={15} />{task.project || "收集箱"}</div><h2>{task.title}</h2>{task.description && <p className="detail-description">{task.description}</p>}<div className="detail-info"><div><span>任务日</span><strong>{formatTaskDate(task.plannedDate)}</strong></div><div><span>预计用时</span><strong>{task.estimateMinutes} 分钟</strong></div><div><span>重复</span><strong>{repeatLabel[task.repeat]}</strong></div></div><section className="subtasks"><div className="detail-section-title"><h3>子任务</h3><span>{task.subtasks.filter((item) => item.completed).length}/{task.subtasks.length}</span></div>{task.subtasks.length ? <div className="subtask-list">{task.subtasks.map((item) => <div className={`subtask ${item.completed ? "completed" : ""}`} key={item.id}><button className="subtask-toggle" title={item.completed ? "标记为未完成" : "标记为已完成"} onClick={() => onToggleSubtask(task.id, item.id)}>{item.completed ? <CheckCircle2 size={17} /> : <Circle size={17} />}</button><span>{item.title}</span><button className="subtask-delete" title="删除子任务" onClick={() => onDeleteSubtask(task.id, item.id)}><Trash2 size={14} /></button></div>)}</div> : <p className="empty-copy">还没有子任务。</p>}<form className="subtask-composer" onSubmit={submitSubtask}><input value={subtaskTitle} onChange={(event) => setSubtaskTitle(event.target.value)} placeholder="添加一个子任务" /><button type="submit" title="添加子任务"><Plus size={15} /></button></form></section><section className="progress-section"><div className="detail-section-title"><h3>每日进展</h3><span>{entries.length} 条记录</span></div><div className="progress-composer"><textarea value={progressText} onChange={(event) => onProgressTextChange(event.target.value)} placeholder={`写下 ${formatTaskDate(selectedDate)} 的进展...`} /><div><span>记录不会自动完成原任务</span><button onClick={() => onAddProgress(task.id, false)}>添加进展</button></div></div><div className="timeline">{entries.length ? entries.map((entry) => <div className="timeline-entry" key={entry.id}><span className="timeline-dot" /><div><div className="timeline-date">{formatTaskDate(entry.taskDate)}{entry.completedToday && <em>今日完成</em>}</div><p>{entry.content}</p></div></div>) : <p className="empty-copy">从今天的一点进展开始吧。</p>}</div></section></div></aside>;
 }
 
-function TaskComposer({ selectedDate, onClose, onSubmit }: { selectedDate: string; onClose: () => void; onSubmit: (form: FormData) => void }) {
-  return <div className="modal-backdrop" role="presentation"><form className="task-composer" onSubmit={(event) => { event.preventDefault(); onSubmit(new FormData(event.currentTarget)); }}><header><div><p className="eyebrow">新的安排</p><h2>留下一件想完成的事</h2></div><button type="button" className="icon-button" onClick={onClose} title="关闭"><X size={19} /></button></header><label className="large-field"><span>任务名称</span><input name="title" autoFocus placeholder="例如：整理本周会议笔记" /></label><label><span>补充说明</span><textarea name="description" placeholder="为它写一点上下文..." /></label><div className="form-grid"><label><span>项目</span><input name="project" defaultValue="收集箱" /></label><label><span>计划任务日</span><input name="plannedDate" type="date" defaultValue={selectedDate} /></label><label><span>优先级</span><select name="priority" defaultValue="medium"><option value="high">重要</option><option value="medium">正常</option><option value="low">轻缓</option></select></label><label><span>重复</span><select name="repeat" defaultValue="none"><option value="none">不重复</option><option value="daily">每天</option><option value="weekdays">工作日</option><option value="weekly">每周</option><option value="monthly">每月</option></select></label><label><span>预计分钟</span><input name="estimateMinutes" type="number" min="0" defaultValue="30" /></label><label><span>标签（用中文逗号分隔）</span><input name="tags" placeholder="工作，深度专注" /></label></div><footer><button type="button" className="text-button" onClick={onClose}>取消</button><button className="primary-button" type="submit"><Plus size={17} />创建任务</button></footer></form></div>;
+function TaskComposer({ task, selectedDate, onClose, onSubmit }: { task?: Task; selectedDate: string; onClose: () => void; onSubmit: (form: FormData) => void }) {
+  const editing = Boolean(task);
+  return <div className="modal-backdrop" role="presentation"><form className="task-composer" onSubmit={(event) => { event.preventDefault(); onSubmit(new FormData(event.currentTarget)); }}><header><div><p className="eyebrow">{editing ? "调整安排" : "新的安排"}</p><h2>{editing ? "编辑任务" : "留下一件想完成的事"}</h2></div><button type="button" className="icon-button" onClick={onClose} title="关闭"><X size={19} /></button></header><label className="large-field"><span>任务名称</span><input name="title" autoFocus defaultValue={task?.title} placeholder="例如：整理本周会议笔记" /></label><label><span>补充说明</span><textarea name="description" defaultValue={task?.description} placeholder="为它写一点上下文..." /></label><div className="form-grid"><label><span>项目</span><input name="project" defaultValue={task?.project ?? "收集箱"} /></label><label><span>计划任务日</span><input name="plannedDate" type="date" defaultValue={task?.plannedDate ?? selectedDate} /></label><label><span>优先级</span><select name="priority" defaultValue={task?.priority ?? "medium"}><option value="high">重要</option><option value="medium">正常</option><option value="low">轻缓</option></select></label><label><span>重复</span><select name="repeat" defaultValue={task?.repeat ?? "none"}><option value="none">不重复</option><option value="daily">每天</option><option value="weekdays">工作日</option><option value="weekly">每周</option><option value="monthly">每月</option></select></label><label><span>预计分钟</span><input name="estimateMinutes" type="number" min="0" defaultValue={task?.estimateMinutes ?? 30} /></label><label><span>标签（用中文逗号分隔）</span><input name="tags" defaultValue={task?.tags.join("，")} placeholder="工作，深度专注" /></label></div><footer><button type="button" className="text-button" onClick={onClose}>取消</button><button className="primary-button" type="submit">{editing ? <Pencil size={16} /> : <Plus size={17} />}{editing ? "保存修改" : "创建任务"}</button></footer></form></div>;
 }
 
 function shiftDate(date: string, amount: number): string {
@@ -251,13 +363,62 @@ function calendarDates(anchor: string, mode: CalendarMode): string[] {
 
 type CalendarMode = "month" | "week" | "day";
 
-function WorkspaceView({ view, tasks, selectedDate, onSelectTask, onSelectDate, onReschedule }: { view: Exclude<View, "today">; tasks: Task[]; selectedDate: string; onSelectTask: (id: string) => void; onSelectDate: (date: string) => void; onReschedule: (taskId: string, targetDate: string) => void }) {
-  const activeTasks = tasks.filter((task) => !task.completedAt);
+function WorkspaceView({ view, tasks, selectedDate, onSelectTask, onSelectDate, onReschedule, onCompleteTasks, onDeleteTasks, onRescheduleTasks }: { view: Exclude<View, "today">; tasks: Task[]; selectedDate: string; onSelectTask: (id: string) => void; onSelectDate: (date: string) => void; onReschedule: (taskId: string, targetDate: string) => void; onCompleteTasks: (taskIds: string[]) => void; onDeleteTasks: (taskIds: string[]) => boolean; onRescheduleTasks: (taskIds: string[], targetDate: string) => void }) {
   if (view === "settings") return <section className="workspace-page"><p className="eyebrow">偏好设置</p><h1>让系统配合你的节奏。</h1><div className="settings-list"><div><div><Clock3 size={18} /><span>任务日结算时间</span></div><strong>北京时间 04:00</strong></div><div><div><Archive size={18} /><span>数据存储</span></div><strong>{usesSqlite() ? "SQLite 本地数据库" : "浏览器本地存储（预览模式）"}</strong></div><div><div><CheckCircle2 size={18} /><span>应用版本</span></div><strong>v0.3.0</strong></div></div></section>;
   if (view === "calendar") return <CalendarWorkspace tasks={tasks} selectedDate={selectedDate} onSelectDate={onSelectDate} onSelectTask={onSelectTask} onReschedule={onReschedule} />;
   if (view === "projects") return <ProjectsWorkspace tasks={tasks} onSelectTask={onSelectTask} />;
   if (view === "insights") return <InsightsWorkspace tasks={tasks} selectedDate={selectedDate} />;
-  return <section className="workspace-page"><p className="eyebrow">工作总览</p><h1>全部任务</h1><div className="workspace-list">{activeTasks.length ? activeTasks.map((task) => <TaskRow key={task.id} task={task} selected={false} onSelect={onSelectTask} onComplete={() => undefined} selectedDate={selectedDate} />) : <div className="empty-workspace">还没有任务，先为今天留下一件小事吧。</div>}</div></section>;
+  return <TasksWorkspace tasks={tasks} selectedDate={selectedDate} onSelectTask={onSelectTask} onCompleteTasks={onCompleteTasks} onDeleteTasks={onDeleteTasks} onRescheduleTasks={onRescheduleTasks} />;
+}
+
+function TasksWorkspace({ tasks, selectedDate, onSelectTask, onCompleteTasks, onDeleteTasks, onRescheduleTasks }: { tasks: Task[]; selectedDate: string; onSelectTask: (taskId: string) => void; onCompleteTasks: (taskIds: string[]) => void; onDeleteTasks: (taskIds: string[]) => boolean; onRescheduleTasks: (taskIds: string[], targetDate: string) => void }) {
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState<"active" | "completed" | "overdue" | "all">("active");
+  const [priority, setPriority] = useState<Priority | "all">("all");
+  const [project, setProject] = useState("all");
+  const [tag, setTag] = useState("all");
+  const [sort, setSort] = useState<"planned" | "priority" | "created">("planned");
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [targetDate, setTargetDate] = useState(selectedDate);
+  const projects = [...new Set(tasks.map((task) => task.project || "收集箱"))].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  const tags = [...new Set(tasks.flatMap((task) => task.tags))].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  const visibleTasks = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    const priorityOrder: Record<Priority, number> = { high: 0, medium: 1, low: 2 };
+    return tasks.filter((task) => {
+      const isOverdue = !task.completedAt && task.repeat === "none" && task.plannedDate < getTaskDate();
+      const matchesQuery = !normalizedQuery || [task.title, task.description ?? "", task.project, ...task.tags].some((value) => value.toLocaleLowerCase().includes(normalizedQuery));
+      const matchesStatus = status === "all" || (status === "active" && !task.completedAt) || (status === "completed" && Boolean(task.completedAt)) || (status === "overdue" && isOverdue);
+      return matchesQuery && matchesStatus && (priority === "all" || task.priority === priority) && (project === "all" || task.project === project) && (tag === "all" || task.tags.includes(tag));
+    }).sort((a, b) => {
+      if (sort === "priority") return priorityOrder[a.priority] - priorityOrder[b.priority] || a.plannedDate.localeCompare(b.plannedDate);
+      if (sort === "created") return b.createdAt.localeCompare(a.createdAt);
+      return a.plannedDate.localeCompare(b.plannedDate) || priorityOrder[a.priority] - priorityOrder[b.priority];
+    });
+  }, [tasks, query, status, priority, project, tag, sort]);
+  const selected = new Set(selectedIds);
+  const allVisibleSelected = visibleTasks.length > 0 && visibleTasks.every((task) => selected.has(task.id));
+  function toggleSelection(taskId: string) {
+    setSelectedIds((ids) => ids.includes(taskId) ? ids.filter((id) => id !== taskId) : [...ids, taskId]);
+  }
+  function rescheduleSelected(date: string) {
+    if (!selectedIds.length || !date) return;
+    onRescheduleTasks(selectedIds, date);
+    setSelectedIds([]);
+  }
+  function completeSelected() {
+    onCompleteTasks(selectedIds);
+    setSelectedIds([]);
+  }
+  function deleteSelected() {
+    if (onDeleteTasks(selectedIds)) setSelectedIds([]);
+  }
+  return <section className="workspace-page tasks-workspace"><div className="tasks-heading"><div><p className="eyebrow">工作总览</p><h1>全部任务</h1></div><span>{visibleTasks.length} 项结果</span></div><div className="task-filters"><label className="task-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索任务、项目或标签" /></label><select value={status} onChange={(event) => setStatus(event.target.value as typeof status)}><option value="active">进行中</option><option value="completed">已完成</option><option value="overdue">逾期</option><option value="all">全部状态</option></select><select value={priority} onChange={(event) => setPriority(event.target.value as Priority | "all")}><option value="all">全部优先级</option><option value="high">重要</option><option value="medium">正常</option><option value="low">轻缓</option></select><select value={project} onChange={(event) => setProject(event.target.value)}><option value="all">全部项目</option>{projects.map((name) => <option key={name} value={name}>{name}</option>)}</select><select value={tag} onChange={(event) => setTag(event.target.value)}><option value="all">全部标签</option>{tags.map((name) => <option key={name} value={name}>{name}</option>)}</select><select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="planned">按计划日期</option><option value="priority">按优先级</option><option value="created">按创建时间</option></select></div>{selectedIds.length > 0 && <div className="bulk-actions"><strong>已选 {selectedIds.length} 项</strong><button onClick={completeSelected}><Check size={15} />完成</button><button onClick={() => rescheduleSelected(getTaskDate())}><CalendarDays size={15} />移至今天</button><label><span>改期至</span><input type="date" value={targetDate} onChange={(event) => setTargetDate(event.target.value)} /></label><button onClick={() => rescheduleSelected(targetDate)} title="应用指定日期"><Check size={15} /></button><button className="bulk-delete" onClick={deleteSelected}><Trash2 size={15} />删除</button><button className="clear-selection" onClick={() => setSelectedIds([])} title="取消选择"><X size={16} /></button></div>}<div className="task-table"><div className="task-table-head"><label><input type="checkbox" checked={allVisibleSelected} onChange={() => setSelectedIds(allVisibleSelected ? [] : visibleTasks.map((task) => task.id))} aria-label="选择全部结果" /></label><span>任务</span><span>计划日</span><span>优先级</span><span>状态</span><span /></div>{visibleTasks.length ? visibleTasks.map((task) => <TaskManageRow key={task.id} task={task} selected={selected.has(task.id)} onToggle={() => toggleSelection(task.id)} onSelect={() => onSelectTask(task.id)} onComplete={() => { onCompleteTasks([task.id]); }} />) : <div className="empty-workspace">没有符合当前筛选条件的任务。</div>}</div></section>;
+}
+
+function TaskManageRow({ task, selected, onToggle, onSelect, onComplete }: { task: Task; selected: boolean; onToggle: () => void; onSelect: () => void; onComplete: () => void }) {
+  const isOverdue = !task.completedAt && task.repeat === "none" && task.plannedDate < getTaskDate();
+  return <div className={`task-table-row ${selected ? "selected" : ""}`}><label><input type="checkbox" checked={selected} onChange={onToggle} aria-label={`选择 ${task.title}`} /></label><button className="task-table-title" onClick={onSelect}><strong>{task.title}</strong><span>{task.project || "收集箱"}{task.tags.length ? ` · ${task.tags.join("、")}` : ""}</span></button><span>{formatTaskDate(task.plannedDate)}</span><span><i className={`priority-dot ${task.priority}`} />{priorityLabel[task.priority]}</span><span className={task.completedAt ? "status-completed" : isOverdue ? "status-overdue" : "status-active"}>{task.completedAt ? "已完成" : isOverdue ? "已逾期" : "进行中"}</span><div>{!task.completedAt && <button className="table-complete" title="完成原任务" onClick={onComplete}><Check size={16} /></button>}<button className="more-button" title="查看详情" onClick={onSelect}><MoreHorizontal size={18} /></button></div></div>;
 }
 
 function CalendarWorkspace({ tasks, selectedDate, onSelectDate, onSelectTask, onReschedule }: { tasks: Task[]; selectedDate: string; onSelectDate: (date: string) => void; onSelectTask: (taskId: string) => void; onReschedule: (taskId: string, targetDate: string) => void }) {

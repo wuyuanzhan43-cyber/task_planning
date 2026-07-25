@@ -1,0 +1,4 @@
+ALTER TABLE tasks ADD COLUMN time_block TEXT NOT NULL DEFAULT 'unscheduled';
+ALTER TABLE tasks ADD COLUMN is_focus INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE projects ADD COLUMN target_date TEXT;
+ALTER TABLE projects ADD COLUMN milestones_json TEXT NOT NULL DEFAULT '[]';

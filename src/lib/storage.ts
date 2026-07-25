@@ -1,7 +1,8 @@
-import type { DailyReview, ProgressEntry, Task } from "../types";
+import type { DailyReview, ProgressEntry, ProjectPlan, Task } from "../types";
 
 const STORAGE_KEY = "dayflow.tasks.v1";
 const REVIEW_STORAGE_KEY = "dayflow.daily-reviews.v1";
+const PROJECT_STORAGE_KEY = "dayflow.project-plans.v1";
 
 type SqlRow = Record<string, unknown>;
 
@@ -48,6 +49,8 @@ function taskFromRow(row: SqlRow, tags: Map<string, string[]>, progress: Map<str
     priority: String(row.priority) as Task["priority"],
     plannedDate: String(row.planned_date),
     dueAt: row.due_at ? String(row.due_at) : undefined,
+    timeBlock: (row.time_block ? String(row.time_block) : "unscheduled") as Task["timeBlock"],
+    isFocus: Boolean(row.is_focus),
     estimateMinutes: Number(row.estimate_minutes),
     repeat: String(row.repeat_rule) as Task["repeat"],
     completedAt: row.completed_at ? String(row.completed_at) : undefined,
@@ -99,32 +102,43 @@ export async function loadTasks(): Promise<Task[]> {
   return tasks;
 }
 
-export async function saveTasks(tasks: Task[]): Promise<void> {
+export async function saveTasks(tasks: Task[], previousTasks: Task[] = []): Promise<void> {
   if (!isTauriRuntime()) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
     return;
   }
 
+  const previousById = new Map(previousTasks.map((task) => [task.id, task]));
+  const currentIds = new Set(tasks.map((task) => task.id));
+  const changedTasks = tasks.filter((task) => JSON.stringify(task) !== JSON.stringify(previousById.get(task.id)));
+  const removedTaskIds = previousTasks.filter((task) => !currentIds.has(task.id)).map((task) => task.id);
+  if (changedTasks.length === 0 && removedTaskIds.length === 0) return;
+
   const database = await getDatabase();
   const now = new Date().toISOString();
   await database.execute("BEGIN TRANSACTION");
   try {
-    await database.execute("DELETE FROM task_tags");
-    await database.execute("DELETE FROM subtasks");
-    await database.execute("DELETE FROM task_progress_entries");
-    await database.execute("DELETE FROM tasks");
+    for (const taskId of removedTaskIds) {
+      await database.execute("DELETE FROM task_tags WHERE task_id = ?", [taskId]);
+      await database.execute("DELETE FROM subtasks WHERE task_id = ?", [taskId]);
+      await database.execute("DELETE FROM task_progress_entries WHERE task_id = ?", [taskId]);
+      await database.execute("DELETE FROM tasks WHERE id = ?", [taskId]);
+    }
 
-    const projects = [...new Set(tasks.map((task) => task.project || "收集箱"))];
+    const projects = [...new Set(changedTasks.map((task) => task.project || "收集箱"))];
     for (const name of projects) {
       await database.execute(
         "INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name",
         [projectId(name), name, now]
       );
     }
-    for (const task of tasks) {
+    for (const task of changedTasks) {
+      await database.execute("DELETE FROM task_tags WHERE task_id = ?", [task.id]);
+      await database.execute("DELETE FROM subtasks WHERE task_id = ?", [task.id]);
+      await database.execute("DELETE FROM task_progress_entries WHERE task_id = ?", [task.id]);
       await database.execute(
-        "INSERT INTO tasks (id, title, description, project_id, priority, planned_date, due_at, estimate_minutes, repeat_rule, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [task.id, task.title, task.description ?? null, projectId(task.project), task.priority, task.plannedDate, task.dueAt ?? null, task.estimateMinutes, task.repeat, task.completedAt ?? null, task.createdAt, now]
+        "INSERT INTO tasks (id, title, description, project_id, priority, planned_date, due_at, time_block, is_focus, estimate_minutes, repeat_rule, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, description = excluded.description, project_id = excluded.project_id, priority = excluded.priority, planned_date = excluded.planned_date, due_at = excluded.due_at, time_block = excluded.time_block, is_focus = excluded.is_focus, estimate_minutes = excluded.estimate_minutes, repeat_rule = excluded.repeat_rule, completed_at = excluded.completed_at, updated_at = excluded.updated_at",
+        [task.id, task.title, task.description ?? null, projectId(task.project), task.priority, task.plannedDate, task.dueAt ?? null, task.timeBlock, task.isFocus ? 1 : 0, task.estimateMinutes, task.repeat, task.completedAt ?? null, task.createdAt, now]
       );
       for (const tag of task.tags) {
         await database.execute("INSERT INTO task_tags (task_id, name) VALUES (?, ?)", [task.id, tag]);
@@ -188,4 +202,46 @@ export async function loadDailyReviews(fromDate: string, toDate: string): Promis
   const database = await getDatabase();
   const rows = await database.select<SqlRow>("SELECT task_date, reflection, tomorrow_focus, updated_at FROM daily_reviews WHERE task_date BETWEEN ? AND ? ORDER BY task_date ASC", [fromDate, toDate]);
   return rows.map((row) => ({ taskDate: String(row.task_date), reflection: String(row.reflection), tomorrowFocus: String(row.tomorrow_focus), updatedAt: String(row.updated_at) }));
+}
+
+export async function loadAllDailyReviews(): Promise<DailyReview[]> {
+  if (!isTauriRuntime()) {
+    try { return Object.values(JSON.parse(localStorage.getItem(REVIEW_STORAGE_KEY) ?? "{}") as Record<string, DailyReview>); } catch { return []; }
+  }
+  const database = await getDatabase();
+  const rows = await database.select<SqlRow>("SELECT task_date, reflection, tomorrow_focus, updated_at FROM daily_reviews ORDER BY task_date ASC");
+  return rows.map((row) => ({ taskDate: String(row.task_date), reflection: String(row.reflection), tomorrowFocus: String(row.tomorrow_focus), updatedAt: String(row.updated_at) }));
+}
+
+export async function replaceDailyReviews(reviews: DailyReview[]): Promise<void> {
+  if (!isTauriRuntime()) {
+    localStorage.setItem(REVIEW_STORAGE_KEY, JSON.stringify(Object.fromEntries(reviews.map((review) => [review.taskDate, review]))));
+    return;
+  }
+  const database = await getDatabase();
+  await database.execute("BEGIN TRANSACTION");
+  try {
+    await database.execute("DELETE FROM daily_reviews");
+    for (const review of reviews) await database.execute("INSERT INTO daily_reviews (task_date, reflection, tomorrow_focus, updated_at) VALUES (?, ?, ?, ?)", [review.taskDate, review.reflection, review.tomorrowFocus, review.updatedAt]);
+    await database.execute("COMMIT");
+  } catch (error) { await database.execute("ROLLBACK"); throw error; }
+}
+
+export async function loadProjectPlans(): Promise<ProjectPlan[]> {
+  if (!isTauriRuntime()) {
+    try { return JSON.parse(localStorage.getItem(PROJECT_STORAGE_KEY) ?? "[]") as ProjectPlan[]; } catch { return []; }
+  }
+  const database = await getDatabase();
+  const rows = await database.select<SqlRow>("SELECT id, name, target_date, milestones_json FROM projects ORDER BY name ASC");
+  return rows.map((row) => ({ id: String(row.id), name: String(row.name), targetDate: row.target_date ? String(row.target_date) : undefined, milestones: JSON.parse(String(row.milestones_json ?? "[]")) }));
+}
+
+export async function saveProjectPlan(plan: ProjectPlan): Promise<void> {
+  if (!isTauriRuntime()) {
+    const current = await loadProjectPlans();
+    localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify([...current.filter((item) => item.id !== plan.id), plan]));
+    return;
+  }
+  const database = await getDatabase();
+  await database.execute("INSERT INTO projects (id, name, target_date, milestones_json, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, target_date = excluded.target_date, milestones_json = excluded.milestones_json", [plan.id, plan.name, plan.targetDate ?? null, JSON.stringify(plan.milestones), new Date().toISOString()]);
 }
