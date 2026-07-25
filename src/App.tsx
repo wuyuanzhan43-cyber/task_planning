@@ -13,8 +13,10 @@ import { loadAllDailyReviews, loadDailyReview, loadDailyReviews, loadTasks, repl
 import type { DailyReview, Priority, RepeatRule, Task, TimeBlock } from "./types";
 
 type View = "today" | "calendar" | "tasks" | "projects" | "insights" | "settings";
+type Theme = "sage" | "coral" | "coast" | "midnight";
 type UndoState = { label: string; tasks: Task[] } | null;
 const AUTO_BACKUP_KEY = "dayflow.auto-backups.v1";
+const THEME_KEY = "dayflow.theme.v1";
 
 const navigation: Array<{ id: View; label: string; icon: typeof CalendarDays }> = [
   { id: "today", label: "今日", icon: Sparkles },
@@ -59,6 +61,10 @@ function App() {
   const [dailyReview, setDailyReview] = useState<DailyReview>({ taskDate: selectedDate, reflection: "", tomorrowFocus: "", updatedAt: "" });
   const [reviewSaved, setReviewSaved] = useState(false);
   const [undo, setUndo] = useState<UndoState>(null);
+  const [theme, setTheme] = useState<Theme>(() => {
+    const savedTheme = localStorage.getItem(THEME_KEY);
+    return savedTheme === "coral" || savedTheme === "coast" || savedTheme === "midnight" ? savedTheme : "sage";
+  });
   const savedTasksRef = useRef<Task[]>([]);
   const saveQueueRef = useRef(Promise.resolve());
 
@@ -79,6 +85,11 @@ function App() {
       .then(() => saveTasks(tasks, previousTasks))
       .catch(() => undefined);
   }, [loaded, tasks]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(THEME_KEY, theme);
+  }, [theme]);
 
   useEffect(() => {
     if (!loaded) return;
@@ -338,7 +349,7 @@ function App() {
             <DailyReviewSection review={dailyReview} onChange={setDailyReview} onSave={persistDailyReview} saved={reviewSaved} />
             <button className="quiet-add" onClick={() => setShowComposer(true)}><Plus size={17} />添加一件想完成的事</button>
           </section>
-        ) : <WorkspaceView view={view} tasks={tasks} selectedDate={selectedDate} onSelectTask={setSelectedTaskId} onSelectDate={setSelectedDate} onReschedule={rescheduleTask} onCompleteTasks={completeTasks} onDeleteTasks={deleteTasks} onRescheduleTasks={rescheduleTasks} onExportData={exportData} onImportData={importData} />}
+        ) : <WorkspaceView view={view} tasks={tasks} selectedDate={selectedDate} onSelectTask={setSelectedTaskId} onSelectDate={setSelectedDate} onReschedule={rescheduleTask} onCompleteTasks={completeTasks} onDeleteTasks={deleteTasks} onRescheduleTasks={rescheduleTasks} onExportData={exportData} onImportData={importData} theme={theme} onThemeChange={setTheme} />}
       </main>
 
       {selectedTask && <TaskDetail task={selectedTask} selectedDate={selectedDate} progressText={progressText} onProgressTextChange={setProgressText} onAddProgress={addProgress} onComplete={completeTask} onEdit={() => setEditingTaskId(selectedTask.id)} onDelete={deleteTask} onAddSubtask={addSubtask} onToggleSubtask={toggleSubtask} onDeleteSubtask={deleteSubtask} onClose={() => setSelectedTaskId(null)} />}
@@ -407,16 +418,17 @@ function calendarDates(anchor: string, mode: CalendarMode): string[] {
 
 type CalendarMode = "month" | "week" | "day";
 
-function WorkspaceView({ view, tasks, selectedDate, onSelectTask, onSelectDate, onReschedule, onCompleteTasks, onDeleteTasks, onRescheduleTasks, onExportData, onImportData }: { view: Exclude<View, "today">; tasks: Task[]; selectedDate: string; onSelectTask: (id: string) => void; onSelectDate: (date: string) => void; onReschedule: (taskId: string, targetDate: string) => void; onCompleteTasks: (taskIds: string[]) => void; onDeleteTasks: (taskIds: string[]) => boolean; onRescheduleTasks: (taskIds: string[], targetDate: string) => void; onExportData: () => Promise<void>; onImportData: (file: File) => Promise<void> }) {
-  if (view === "settings") return <SettingsWorkspace onExportData={onExportData} onImportData={onImportData} />;
+function WorkspaceView({ view, tasks, selectedDate, onSelectTask, onSelectDate, onReschedule, onCompleteTasks, onDeleteTasks, onRescheduleTasks, onExportData, onImportData, theme, onThemeChange }: { view: Exclude<View, "today">; tasks: Task[]; selectedDate: string; onSelectTask: (id: string) => void; onSelectDate: (date: string) => void; onReschedule: (taskId: string, targetDate: string) => void; onCompleteTasks: (taskIds: string[]) => void; onDeleteTasks: (taskIds: string[]) => boolean; onRescheduleTasks: (taskIds: string[], targetDate: string) => void; onExportData: () => Promise<void>; onImportData: (file: File) => Promise<void>; theme: Theme; onThemeChange: (theme: Theme) => void }) {
+  if (view === "settings") return <SettingsWorkspace onExportData={onExportData} onImportData={onImportData} theme={theme} onThemeChange={onThemeChange} />;
   if (view === "calendar") return <CalendarWorkspace tasks={tasks} selectedDate={selectedDate} onSelectDate={onSelectDate} onSelectTask={onSelectTask} onReschedule={onReschedule} />;
   if (view === "projects") return <ProjectsWorkspace tasks={tasks} onSelectTask={onSelectTask} />;
   if (view === "insights") return <InsightsWorkspace tasks={tasks} selectedDate={selectedDate} />;
   return <TasksWorkspace tasks={tasks} selectedDate={selectedDate} onSelectTask={onSelectTask} onCompleteTasks={onCompleteTasks} onDeleteTasks={onDeleteTasks} onRescheduleTasks={onRescheduleTasks} />;
 }
 
-function SettingsWorkspace({ onExportData, onImportData }: { onExportData: () => Promise<void>; onImportData: (file: File) => Promise<void> }) {
-  return <section className="workspace-page settings-workspace"><p className="eyebrow">偏好设置</p><h1>让系统配合你的节奏。</h1><div className="settings-list"><div><div><Clock3 size={18} /><span>任务日结算时间</span></div><strong>北京时间 04:00</strong></div><div><div><Archive size={18} /><span>数据存储</span></div><strong>{usesSqlite() ? "SQLite 本地数据库" : "浏览器本地存储（预览模式）"}</strong></div><div><div><CheckCircle2 size={18} /><span>应用版本</span></div><strong>v0.3.0</strong></div></div><section className="backup-panel"><div><p className="eyebrow">数据安全</p><h2>备份与恢复</h2><span>每次任务变更会在本机保留最近 5 份自动快照。</span></div><div className="backup-actions"><button className="primary-button" onClick={() => void onExportData()}><Archive size={16} />导出备份</button><label className="import-button"><span>导入备份</span><input type="file" accept="application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) void onImportData(file); event.currentTarget.value = ""; }} /></label></div></section></section>;
+function SettingsWorkspace({ onExportData, onImportData, theme, onThemeChange }: { onExportData: () => Promise<void>; onImportData: (file: File) => Promise<void>; theme: Theme; onThemeChange: (theme: Theme) => void }) {
+  const themes: Array<{ id: Theme; name: string; note: string }> = [{ id: "sage", name: "自然绿", note: "安静、平衡" }, { id: "coral", name: "明亮珊瑚", note: "温暖、有活力" }, { id: "coast", name: "冷静海岸", note: "清晰、专注" }, { id: "midnight", name: "深夜高对比", note: "沉浸、醒目" }];
+  return <section className="workspace-page settings-workspace"><p className="eyebrow">偏好设置</p><h1>让系统配合你的节奏。</h1><section className="theme-panel"><div><p className="eyebrow">界面外观</p><h2>选择主题</h2><span>颜色会立即应用并在下次启动时保留。</span></div><div className="theme-grid">{themes.map((item) => <button key={item.id} className={`theme-option theme-${item.id} ${theme === item.id ? "selected" : ""}`} onClick={() => onThemeChange(item.id)}><span className="theme-swatches"><i /><i /><i /></span><strong>{item.name}</strong><small>{item.note}</small>{theme === item.id && <Check size={16} />}</button>)}</div></section><div className="settings-list"><div><div><Clock3 size={18} /><span>任务日结算时间</span></div><strong>北京时间 04:00</strong></div><div><div><Archive size={18} /><span>数据存储</span></div><strong>{usesSqlite() ? "SQLite 本地数据库" : "浏览器本地存储（预览模式）"}</strong></div><div><div><CheckCircle2 size={18} /><span>应用版本</span></div><strong>v0.3.0</strong></div></div><section className="backup-panel"><div><p className="eyebrow">数据安全</p><h2>备份与恢复</h2><span>每次任务变更会在本机保留最近 5 份自动快照。</span></div><div className="backup-actions"><button className="primary-button" onClick={() => void onExportData()}><Archive size={16} />导出备份</button><label className="import-button"><span>导入备份</span><input type="file" accept="application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) void onImportData(file); event.currentTarget.value = ""; }} /></label></div></section></section>;
 }
 
 function TasksWorkspace({ tasks, selectedDate, onSelectTask, onCompleteTasks, onDeleteTasks, onRescheduleTasks }: { tasks: Task[]; selectedDate: string; onSelectTask: (taskId: string) => void; onCompleteTasks: (taskIds: string[]) => void; onDeleteTasks: (taskIds: string[]) => boolean; onRescheduleTasks: (taskIds: string[], targetDate: string) => void }) {
