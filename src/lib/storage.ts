@@ -20,7 +20,12 @@ function isTauriRuntime(): boolean {
 async function getDatabase(): Promise<SqlDatabase> {
   if (!databasePromise) {
     databasePromise = import("@tauri-apps/plugin-sql")
-      .then(({ default: Database }) => Database.load("sqlite:dayflow.db") as Promise<SqlDatabase>);
+      .then(({ default: Database }) => Database.load("sqlite:dayflow.db") as Promise<SqlDatabase>)
+      .catch((error) => {
+        // 打开失败时不要缓存被拒绝的 Promise，否则“重试”永远拿到同一个失败结果
+        databasePromise = null;
+        throw error;
+      });
   }
   return databasePromise;
 }

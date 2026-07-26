@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   BarChart3, CalendarDays, Clock3, FolderKanban, ListTodo,
   MoreHorizontal, Plus, Repeat, Search, Settings, Sparkles, Target, X
@@ -45,6 +45,7 @@ const navigation: Array<{ id: View; label: string; icon: typeof CalendarDays }> 
 function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loadState, setLoadState] = useState<LoadState>("loading");
+  const [loadErrorDetail, setLoadErrorDetail] = useState("");
   const [view, setView] = useState<View>("today");
   const [selectedDate, setSelectedDate] = useState(getTaskDate());
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -76,14 +77,6 @@ function App() {
   const notifySeededRef = useRef(false);
   const loaded = loadState === "ready";
 
-  const restoreUndo = useCallback(() => {
-    const last = undoStack[undoStack.length - 1];
-    if (!last) return;
-    setTasks(last.tasks);
-    setUndoStack((stack) => stack.slice(0, -1));
-    if (undoStack.length <= 1) setShowUndoToast(false);
-  }, [undoStack]);
-
   function loadInitialTasks() {
     setLoadState("loading");
     void loadTasks().then((saved) => {
@@ -93,7 +86,11 @@ function App() {
       persistedRef.current = saved;
       setTasks(initialTasks);
       setLoadState("ready");
-    }).catch(() => setLoadState("error"));
+    }).catch((error) => {
+      console.error("[dayflow] 数据加载失败:", error);
+      setLoadErrorDetail(typeof error === "string" ? error : String((error as Error)?.message ?? error));
+      setLoadState("error");
+    });
   }
 
   useEffect(loadInitialTasks, []);
@@ -185,7 +182,7 @@ function App() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [searchOpen, confirmRequest, showAlerts, showComposer, editingTaskId, selectedTaskId, restoreUndo]);
+  }, [searchOpen, confirmRequest, showAlerts, showComposer, editingTaskId, selectedTaskId, undoStack]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -539,6 +536,14 @@ function App() {
     setShowUndoToast(true);
   }
 
+  function restoreUndo() {
+    const last = undoStack[undoStack.length - 1];
+    if (!last) return;
+    setTasks(last.tasks);
+    setUndoStack((stack) => stack.slice(0, -1));
+    if (undoStack.length <= 1) setShowUndoToast(false);
+  }
+
   const activeTasks = tasks.filter((task) => !task.deletedAt);
   const trashTasks = tasks.filter((task) => task.deletedAt).sort((a, b) => (b.deletedAt ?? "").localeCompare(a.deletedAt ?? ""));
   const overdueTasks = activeTasks.filter((task) => !task.completedAt && task.repeat === "none" && task.plannedDate < todayKey);
@@ -626,7 +631,7 @@ function App() {
         </header>
 
         {loadState === "error" ? (
-          <section className="load-error"><div><h1>数据加载失败</h1><p>没能从本地数据库读取任务。你的数据仍在本机，请重试；如果反复失败，可以重启应用。</p><button className="primary-button" onClick={loadInitialTasks}>重新加载</button></div></section>
+          <section className="load-error"><div><h1>数据加载失败</h1><p>没能打开本地数据库。你的数据文件仍在本机（%APPDATA%\com.dayflow.planner\dayflow.db），未被删除。</p>{loadErrorDetail && <pre className="load-error-detail">{loadErrorDetail}</pre>}<button className="primary-button" onClick={loadInitialTasks}>重新加载</button></div></section>
         ) : view === "today" ? (
           <TodayView tasks={activeTasks} loaded={loaded} selectedDate={selectedDate} todayKey={todayKey} selectedTaskId={selectedTaskId} onSelectTask={setSelectedTaskId} onSelectDate={setSelectedDate} onComplete={completeTask} onAddProgress={addProgress} onReschedule={rescheduleTask} onToggleFocus={toggleFocus} onAssignTimeBlock={assignTimeBlock} onReopenTask={reopenTask} onUndoExecution={undoExecution} onOpenComposer={() => setShowComposer(true)} onDeleteTask={deleteTask} onCreateTomorrow={(parsed) => createQuickTask(parsed, false)} dailyReview={dailyReview} onSaveReview={persistDailyReview} />
         ) : view === "calendar" ? (

@@ -392,3 +392,5 @@ html[data-theme="midnight"] .stalled-actions .stalled-drop { color: #ffab9d; bac
   .crumb { display: none; }
   .topbar { justify-content: flex-end; }
 }
+
+.load-error-detail { overflow: auto; max-height: 150px; margin: 0 0 20px; padding: 11px; border-radius: 6px; background: var(--theme-soft); color: #a05b52; font-size: 11px; text-align: left; white-space: pre-wrap; word-break: break-all; }
