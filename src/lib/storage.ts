@@ -38,6 +38,20 @@ function projectId(name: string): string {
   return `project:${encodeURIComponent(name || "收集箱")}`;
 }
 
+export function projectPlanId(name: string): string {
+  return projectId(name);
+}
+
+function parseRepeatConfig(value: unknown): Task["repeatConfig"] {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(String(value)) as Task["repeatConfig"];
+    return parsed && typeof parsed === "object" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function taskFromRow(row: SqlRow, tags: Map<string, string[]>, progress: Map<string, ProgressEntry[]>, subtasks: Map<string, Task["subtasks"]>): Task {
   const id = String(row.id);
   return {
@@ -53,7 +67,9 @@ function taskFromRow(row: SqlRow, tags: Map<string, string[]>, progress: Map<str
     isFocus: Boolean(row.is_focus),
     estimateMinutes: Number(row.estimate_minutes),
     repeat: String(row.repeat_rule) as Task["repeat"],
+    repeatConfig: parseRepeatConfig(row.repeat_config),
     completedAt: row.completed_at ? String(row.completed_at) : undefined,
+    deletedAt: row.deleted_at ? String(row.deleted_at) : undefined,
     progress: progress.get(id) ?? [],
     subtasks: subtasks.get(id) ?? [],
     createdAt: String(row.created_at)
@@ -137,8 +153,8 @@ export async function saveTasks(tasks: Task[], previousTasks: Task[] = []): Prom
       await database.execute("DELETE FROM subtasks WHERE task_id = ?", [task.id]);
       await database.execute("DELETE FROM task_progress_entries WHERE task_id = ?", [task.id]);
       await database.execute(
-        "INSERT INTO tasks (id, title, description, project_id, priority, planned_date, due_at, time_block, is_focus, estimate_minutes, repeat_rule, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, description = excluded.description, project_id = excluded.project_id, priority = excluded.priority, planned_date = excluded.planned_date, due_at = excluded.due_at, time_block = excluded.time_block, is_focus = excluded.is_focus, estimate_minutes = excluded.estimate_minutes, repeat_rule = excluded.repeat_rule, completed_at = excluded.completed_at, updated_at = excluded.updated_at",
-        [task.id, task.title, task.description ?? null, projectId(task.project), task.priority, task.plannedDate, task.dueAt ?? null, task.timeBlock, task.isFocus ? 1 : 0, task.estimateMinutes, task.repeat, task.completedAt ?? null, task.createdAt, now]
+        "INSERT INTO tasks (id, title, description, project_id, priority, planned_date, due_at, time_block, is_focus, estimate_minutes, repeat_rule, repeat_config, completed_at, deleted_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, description = excluded.description, project_id = excluded.project_id, priority = excluded.priority, planned_date = excluded.planned_date, due_at = excluded.due_at, time_block = excluded.time_block, is_focus = excluded.is_focus, estimate_minutes = excluded.estimate_minutes, repeat_rule = excluded.repeat_rule, repeat_config = excluded.repeat_config, completed_at = excluded.completed_at, deleted_at = excluded.deleted_at, updated_at = excluded.updated_at",
+        [task.id, task.title, task.description ?? null, projectId(task.project), task.priority, task.plannedDate, task.dueAt ?? null, task.timeBlock, task.isFocus ? 1 : 0, task.estimateMinutes, task.repeat, task.repeatConfig ? JSON.stringify(task.repeatConfig) : null, task.completedAt ?? null, task.deletedAt ?? null, task.createdAt, now]
       );
       for (const tag of task.tags) {
         await database.execute("INSERT INTO task_tags (task_id, name) VALUES (?, ?)", [task.id, tag]);
