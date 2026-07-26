@@ -7,6 +7,15 @@ use tauri::{
 };
 use tauri_plugin_sql::{Migration, MigrationKind};
 
+/// 统一迁移脚本的换行符，保证无论源码以 CRLF 还是 LF 检出，迁移校验指纹都一致。
+fn migration_sql(raw: &'static str) -> &'static str {
+    if raw.contains('\r') {
+        Box::leak(raw.replace("\r\n", "\n").into_boxed_str())
+    } else {
+        raw
+    }
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -30,22 +39,22 @@ fn main() {
                     vec![Migration {
                         version: 1,
                         description: "create_dayflow_tables",
-                        sql: include_str!("../migrations/0001_initial.sql"),
+                        sql: migration_sql(include_str!("../migrations/0001_initial.sql")),
                         kind: MigrationKind::Up,
                     }, Migration {
                         version: 2,
                         description: "add_daily_reviews",
-                        sql: include_str!("../migrations/0002_daily_reviews.sql"),
+                        sql: migration_sql(include_str!("../migrations/0002_daily_reviews.sql")),
                         kind: MigrationKind::Up,
                     }, Migration {
                         version: 3,
                         description: "add_planning_features",
-                        sql: include_str!("../migrations/0003_planning_features.sql"),
+                        sql: migration_sql(include_str!("../migrations/0003_planning_features.sql")),
                         kind: MigrationKind::Up,
                     }, Migration {
                         version: 4,
                         description: "add_soft_delete",
-                        sql: include_str!("../migrations/0004_soft_delete.sql"),
+                        sql: migration_sql(include_str!("../migrations/0004_soft_delete.sql")),
                         kind: MigrationKind::Up,
                     }],
                 )

@@ -30,10 +30,45 @@ async function getDatabase(): Promise<SqlDatabase> {
   return databasePromise;
 }
 
+/** 补全缺失字段：早期版本（localStorage 时代）的任务缺少后来新增的属性，直接写库会失败。 */
+function normalizeTask(task: Partial<Task> & { id?: string; title?: string }): Task {
+  return {
+    id: String(task.id ?? `task-${Math.random().toString(36).slice(2)}`),
+    title: String(task.title ?? "未命名任务"),
+    description: task.description ? String(task.description) : undefined,
+    project: task.project ? String(task.project) : "收集箱",
+    tags: Array.isArray(task.tags) ? task.tags.map(String) : [],
+    priority: task.priority === "high" || task.priority === "low" ? task.priority : "medium",
+    plannedDate: typeof task.plannedDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(task.plannedDate) ? task.plannedDate : new Date().toISOString().slice(0, 10),
+    dueAt: task.dueAt ? String(task.dueAt) : undefined,
+    timeBlock: task.timeBlock === "morning" || task.timeBlock === "afternoon" || task.timeBlock === "evening" ? task.timeBlock : "unscheduled",
+    isFocus: Boolean(task.isFocus),
+    estimateMinutes: Number.isFinite(Number(task.estimateMinutes)) ? Number(task.estimateMinutes) : 30,
+    repeat: task.repeat === "daily" || task.repeat === "weekdays" || task.repeat === "weekly" || task.repeat === "monthly" ? task.repeat : "none",
+    repeatConfig: task.repeatConfig && typeof task.repeatConfig === "object" ? task.repeatConfig : undefined,
+    completedAt: task.completedAt ? String(task.completedAt) : undefined,
+    deletedAt: task.deletedAt ? String(task.deletedAt) : undefined,
+    progress: Array.isArray(task.progress) ? task.progress.filter((entry) => entry && entry.content !== undefined).map((entry, index) => ({
+      id: String(entry.id ?? `progress-legacy-${index}`),
+      taskDate: String(entry.taskDate ?? "").slice(0, 10) || new Date().toISOString().slice(0, 10),
+      content: String(entry.content),
+      completedToday: Boolean(entry.completedToday),
+      createdAt: String(entry.createdAt ?? new Date().toISOString())
+    })) : [],
+    subtasks: Array.isArray(task.subtasks) ? task.subtasks.filter((subtask) => subtask && subtask.title !== undefined).map((subtask, index) => ({
+      id: String(subtask.id ?? `subtask-legacy-${index}`),
+      title: String(subtask.title),
+      completed: Boolean(subtask.completed)
+    })) : [],
+    createdAt: String(task.createdAt ?? new Date().toISOString())
+  };
+}
+
 function parseLocalTasks(): Task[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) as Task[] : [];
+    const parsed = raw ? JSON.parse(raw) as Array<Partial<Task>> : [];
+    return Array.isArray(parsed) ? parsed.filter((task) => task && task.title !== undefined).map(normalizeTask) : [];
   } catch {
     return [];
   }
@@ -116,7 +151,12 @@ export async function loadTasks(): Promise<Task[]> {
   if (tasks.length === 0) {
     const legacyTasks = parseLocalTasks();
     if (legacyTasks.length > 0) {
-      await saveTasks(legacyTasks);
+      try {
+        await saveTasks(legacyTasks);
+      } catch (error) {
+        // 旧数据迁移失败不应阻塞应用启动：先用内存中的数据运行，常规保存流程会重试并提示。
+        console.error("[dayflow] 旧数据自动迁移失败（应用仍可使用）:", error);
+      }
       return legacyTasks;
     }
   }
@@ -173,7 +213,9 @@ export async function saveTasks(tasks: Task[], previousTasks: Task[] = []): Prom
     }
     await database.execute("COMMIT");
   } catch (error) {
-    await database.execute("ROLLBACK");
+    try {
+      await database.execute("ROLLBACK");
+    } catch { /* 回滚失败时保留原始错误，不要用回滚错误覆盖它 */ }
     throw error;
   }
 }
@@ -245,7 +287,10 @@ export async function replaceDailyReviews(reviews: DailyReview[]): Promise<void>
     await database.execute("DELETE FROM daily_reviews");
     for (const review of reviews) await database.execute("INSERT INTO daily_reviews (task_date, reflection, tomorrow_focus, updated_at) VALUES (?, ?, ?, ?)", [review.taskDate, review.reflection, review.tomorrowFocus, review.updatedAt]);
     await database.execute("COMMIT");
-  } catch (error) { await database.execute("ROLLBACK"); throw error; }
+  } catch (error) {
+    try { await database.execute("ROLLBACK"); } catch { /* 保留原始错误 */ }
+    throw error;
+  }
 }
 
 export async function loadProjectPlans(): Promise<ProjectPlan[]> {
