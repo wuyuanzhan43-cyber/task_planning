@@ -11,6 +11,11 @@ interface SqlDatabase {
   select<T>(query: string, bindValues?: unknown[]): Promise<T[]>;
 }
 
+interface SqlOperation {
+  query: string;
+  bindValues: unknown[];
+}
+
 let databasePromise: Promise<SqlDatabase> | null = null;
 
 function isTauriRuntime(): boolean {
@@ -28,6 +33,12 @@ async function getDatabase(): Promise<SqlDatabase> {
       });
   }
   return databasePromise;
+}
+
+async function executeTransaction(operations: SqlOperation[]): Promise<void> {
+  await getDatabase();
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("execute_transaction", { operations });
 }
 
 /** 补全缺失字段：早期版本（localStorage 时代）的任务缺少后来新增的属性，直接写库会失败。 */
@@ -175,49 +186,42 @@ export async function saveTasks(tasks: Task[], previousTasks: Task[] = []): Prom
   const removedTaskIds = previousTasks.filter((task) => !currentIds.has(task.id)).map((task) => task.id);
   if (changedTasks.length === 0 && removedTaskIds.length === 0) return;
 
-  const database = await getDatabase();
   const now = new Date().toISOString();
-  await database.execute("BEGIN TRANSACTION");
-  try {
-    for (const taskId of removedTaskIds) {
-      await database.execute("DELETE FROM task_tags WHERE task_id = ?", [taskId]);
-      await database.execute("DELETE FROM subtasks WHERE task_id = ?", [taskId]);
-      await database.execute("DELETE FROM task_progress_entries WHERE task_id = ?", [taskId]);
-      await database.execute("DELETE FROM tasks WHERE id = ?", [taskId]);
-    }
-
-    const projects = [...new Set(changedTasks.map((task) => task.project || "收集箱"))];
-    for (const name of projects) {
-      await database.execute(
-        "INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name",
-        [projectId(name), name, now]
-      );
-    }
-    for (const task of changedTasks) {
-      await database.execute("DELETE FROM task_tags WHERE task_id = ?", [task.id]);
-      await database.execute("DELETE FROM subtasks WHERE task_id = ?", [task.id]);
-      await database.execute("DELETE FROM task_progress_entries WHERE task_id = ?", [task.id]);
-      await database.execute(
-        "INSERT INTO tasks (id, title, description, project_id, priority, planned_date, due_at, time_block, is_focus, estimate_minutes, repeat_rule, repeat_config, completed_at, deleted_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, description = excluded.description, project_id = excluded.project_id, priority = excluded.priority, planned_date = excluded.planned_date, due_at = excluded.due_at, time_block = excluded.time_block, is_focus = excluded.is_focus, estimate_minutes = excluded.estimate_minutes, repeat_rule = excluded.repeat_rule, repeat_config = excluded.repeat_config, completed_at = excluded.completed_at, deleted_at = excluded.deleted_at, updated_at = excluded.updated_at",
-        [task.id, task.title, task.description ?? null, projectId(task.project), task.priority, task.plannedDate, task.dueAt ?? null, task.timeBlock, task.isFocus ? 1 : 0, task.estimateMinutes, task.repeat, task.repeatConfig ? JSON.stringify(task.repeatConfig) : null, task.completedAt ?? null, task.deletedAt ?? null, task.createdAt, now]
-      );
-      for (const tag of task.tags) {
-        await database.execute("INSERT INTO task_tags (task_id, name) VALUES (?, ?)", [task.id, tag]);
-      }
-      for (const [position, subtask] of task.subtasks.entries()) {
-        await database.execute("INSERT INTO subtasks (id, task_id, title, position, completed_at) VALUES (?, ?, ?, ?, ?)", [subtask.id, task.id, subtask.title, position, subtask.completed ? now : null]);
-      }
-      for (const entry of task.progress) {
-        await database.execute("INSERT INTO task_progress_entries (id, task_id, task_date, content, completed_today, created_at) VALUES (?, ?, ?, ?, ?, ?)", [entry.id, task.id, entry.taskDate, entry.content, entry.completedToday ? 1 : 0, entry.createdAt]);
-      }
-    }
-    await database.execute("COMMIT");
-  } catch (error) {
-    try {
-      await database.execute("ROLLBACK");
-    } catch { /* 回滚失败时保留原始错误，不要用回滚错误覆盖它 */ }
-    throw error;
+  const operations: SqlOperation[] = [];
+  const add = (query: string, bindValues: unknown[] = []) => operations.push({ query, bindValues });
+  for (const taskId of removedTaskIds) {
+    add("DELETE FROM task_tags WHERE task_id = ?", [taskId]);
+    add("DELETE FROM subtasks WHERE task_id = ?", [taskId]);
+    add("DELETE FROM task_progress_entries WHERE task_id = ?", [taskId]);
+    add("DELETE FROM tasks WHERE id = ?", [taskId]);
   }
+
+  const projects = [...new Set(changedTasks.map((task) => task.project || "收集箱"))];
+  for (const name of projects) {
+    add(
+      "INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+      [projectId(name), name, now]
+    );
+  }
+  for (const task of changedTasks) {
+    add("DELETE FROM task_tags WHERE task_id = ?", [task.id]);
+    add("DELETE FROM subtasks WHERE task_id = ?", [task.id]);
+    add("DELETE FROM task_progress_entries WHERE task_id = ?", [task.id]);
+    add(
+      "INSERT INTO tasks (id, title, description, project_id, priority, planned_date, due_at, time_block, is_focus, estimate_minutes, repeat_rule, repeat_config, completed_at, deleted_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, description = excluded.description, project_id = excluded.project_id, priority = excluded.priority, planned_date = excluded.planned_date, due_at = excluded.due_at, time_block = excluded.time_block, is_focus = excluded.is_focus, estimate_minutes = excluded.estimate_minutes, repeat_rule = excluded.repeat_rule, repeat_config = excluded.repeat_config, completed_at = excluded.completed_at, deleted_at = excluded.deleted_at, updated_at = excluded.updated_at",
+      [task.id, task.title, task.description ?? null, projectId(task.project), task.priority, task.plannedDate, task.dueAt ?? null, task.timeBlock, task.isFocus ? 1 : 0, task.estimateMinutes, task.repeat, task.repeatConfig ? JSON.stringify(task.repeatConfig) : null, task.completedAt ?? null, task.deletedAt ?? null, task.createdAt, now]
+    );
+    for (const tag of new Set(task.tags)) {
+      add("INSERT INTO task_tags (task_id, name) VALUES (?, ?)", [task.id, tag]);
+    }
+    for (const [position, subtask] of task.subtasks.entries()) {
+      add("INSERT INTO subtasks (id, task_id, title, position, completed_at) VALUES (?, ?, ?, ?, ?)", [subtask.id, task.id, subtask.title, position, subtask.completed ? now : null]);
+    }
+    for (const entry of task.progress) {
+      add("INSERT INTO task_progress_entries (id, task_id, task_date, content, completed_today, created_at) VALUES (?, ?, ?, ?, ?, ?)", [entry.id, task.id, entry.taskDate, entry.content, entry.completedToday ? 1 : 0, entry.createdAt]);
+    }
+  }
+  await executeTransaction(operations);
 }
 
 export function usesSqlite(): boolean {
@@ -281,16 +285,13 @@ export async function replaceDailyReviews(reviews: DailyReview[]): Promise<void>
     localStorage.setItem(REVIEW_STORAGE_KEY, JSON.stringify(Object.fromEntries(reviews.map((review) => [review.taskDate, review]))));
     return;
   }
-  const database = await getDatabase();
-  await database.execute("BEGIN TRANSACTION");
-  try {
-    await database.execute("DELETE FROM daily_reviews");
-    for (const review of reviews) await database.execute("INSERT INTO daily_reviews (task_date, reflection, tomorrow_focus, updated_at) VALUES (?, ?, ?, ?)", [review.taskDate, review.reflection, review.tomorrowFocus, review.updatedAt]);
-    await database.execute("COMMIT");
-  } catch (error) {
-    try { await database.execute("ROLLBACK"); } catch { /* 保留原始错误 */ }
-    throw error;
-  }
+  await executeTransaction([
+    { query: "DELETE FROM daily_reviews", bindValues: [] },
+    ...reviews.map((review) => ({
+      query: "INSERT INTO daily_reviews (task_date, reflection, tomorrow_focus, updated_at) VALUES (?, ?, ?, ?)",
+      bindValues: [review.taskDate, review.reflection, review.tomorrowFocus, review.updatedAt]
+    }))
+  ]);
 }
 
 export async function loadProjectPlans(): Promise<ProjectPlan[]> {

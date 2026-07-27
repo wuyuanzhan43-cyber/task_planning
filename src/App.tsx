@@ -105,7 +105,8 @@ function App() {
         await saveTasks(tasks, previous);
         persistedRef.current = tasks;
         setSaveError(false);
-      } catch {
+      } catch (error) {
+        console.error("[dayflow] 数据保存失败:", error);
         setSaveError(true);
       }
     });
